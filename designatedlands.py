@@ -204,6 +204,64 @@ def download_file(url: str, path: str, filename: str, overwrite: bool = False):
     return out_file, out_folder
 
 
+def resolve_catalogue_to_wfs_layer(slug: str) -> str:
+    """
+    Resolve a BC Data Catalogue dataset slug to its BCGW WFS typeName.
+
+    Queries the catalogue API and inspects each resource URL for an
+    openmaps.gov.bc.ca WFS/OWS link, then extracts the layer name.
+
+    Parameters
+    ----------
+    slug : str
+        Last path segment of the catalogue URL
+        (e.g. 'bcgs-1-20-000-grid').
+
+    Returns
+    -------
+    str
+        BCGW WFS typeName, e.g. 'WHSE_BASEMAPPING.BCGS_20K_GRID'.
+
+    Raises
+    ------
+    ValueError
+        If no WFS layer name can be resolved from the catalogue entry.
+    """
+    api_url = (
+        f"https://catalogue.data.gov.bc.ca/api/3/action/package_show?id={slug}"
+    )
+    resp = requests.get(api_url, verify=False, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+
+    resources = data.get("result", {}).get("resources", [])
+    for res in resources:
+        url = res.get("url", "")
+        if "openmaps.gov.bc.ca" not in url:
+            continue
+        # Pattern 1: .../pub/SCHEMA.LAYER_NAME/wfs  or  .../pub/SCHEMA.LAYER_NAME/ows
+        parts = url.split("/")
+        for i, part in enumerate(parts):
+            if part == "pub" and i + 1 < len(parts):
+                candidate = parts[i + 1].split("?")[0]  # strip any query string
+                if "." in candidate:
+                    return candidate
+        # Pattern 2: typeName=SCHEMA.LAYER_NAME in query string
+        parsed_res = urlparse(url)
+        qs = dict(
+            p.split("=", 1) for p in parsed_res.query.split("&") if "=" in p
+        )
+        for key in ("typeName", "TYPENAME", "layers", "LAYERS"):
+            if key in qs and "." in qs[key]:
+                return qs[key]
+
+    raise ValueError(
+        f"Could not resolve a WFS layer name for catalogue slug '{slug}'. "
+        f"No matching openmaps.gov.bc.ca resource was found in the catalogue "
+        f"entry. Check the URL in your sources CSV."
+    )
+
+
 def download_bcgw_wfs(
     package: str,
     out_fc: str,
@@ -249,6 +307,20 @@ def download_bcgw_wfs(
     if feature_count == 0:
         LOG.warning("  No features returned for %s", package)
         return
+
+    # Strip Z coordinates — arcpy JSONToFeatures fails if the spatial reference
+    # has no Z domain, which is common with BCGW WFS responses.
+    def _drop_z(coords):
+        if not coords:
+            return coords
+        if isinstance(coords[0], (int, float)):
+            return coords[:2]
+        return [_drop_z(c) for c in coords]
+
+    for feature in geojson_data.get("features", []):
+        geom = feature.get("geometry")
+        if geom and "coordinates" in geom:
+            geom["coordinates"] = _drop_z(geom["coordinates"])
 
     # Write GeoJSON to a temp file and load with arcpy
     with tempfile.NamedTemporaryFile(
@@ -561,13 +633,21 @@ class DesignatedLands:
 
             if parsed.hostname == "catalogue.data.gov.bc.ca":
                 # BCGW download via public WFS
-                package = os.path.split(parsed.path)[1]
+                slug = os.path.split(parsed.path)[1]
+                try:
+                    wfs_layer = resolve_catalogue_to_wfs_layer(slug)
+                except (ValueError, requests.RequestException) as exc:
+                    LOG.error(
+                        "Could not resolve WFS layer for '%s': %s — skipping",
+                        slug, exc,
+                    )
+                    continue
                 # Expand {currdate} placeholder if present in query
                 query = source.get("query", "") or ""
                 if "{currdate}" in query:
                     query = query.format(currdate=date.today().isoformat())
                 download_bcgw_wfs(
-                    package=package,
+                    package=wfs_layer,
                     out_fc=out_fc,
                     query=query or None,
                 )
