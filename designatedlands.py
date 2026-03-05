@@ -34,7 +34,8 @@ import tarfile
 import tempfile
 import urllib.request
 import zipfile
-from datetime import date
+from functools import wraps
+from datetime import date, datetime
 from math import ceil
 from pathlib import Path
 from urllib.parse import urlparse
@@ -57,6 +58,40 @@ except ImportError:
 
 
 LOG = logging.getLogger(__name__)
+_STDOUT_REDIRECTED = False
+_ORIGINAL_STDOUT = sys.stdout
+_ORIGINAL_STDERR = sys.stderr
+_ARCPY_TOOL_LOGGING_ENABLED = False
+
+
+class _LoggerStream:
+    """File-like stream that forwards writes to logging."""
+
+    def __init__(self, logger: logging.Logger, level: int):
+        self.logger = logger
+        self.level = level
+        self._buffer = ""
+
+    def write(self, msg):
+        if not msg:
+            return 0
+        self._buffer += str(msg)
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            line = line.rstrip()
+            if line:
+                self.logger.log(self.level, line)
+        return len(msg)
+
+    def flush(self):
+        if self._buffer:
+            line = self._buffer.rstrip()
+            if line:
+                self.logger.log(self.level, line)
+            self._buffer = ""
+
+    def isatty(self):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -101,18 +136,129 @@ class ConfigValueError(Exception):
 # Logging helpers
 # ---------------------------------------------------------------------------
 
-def set_log_level(verbose: bool, quiet: bool):
+def set_log_level(verbose: bool, quiet: bool, log_dir: str = None) -> str:
     if verbose:
         level = logging.DEBUG
     elif quiet:
         level = logging.WARNING
     else:
         level = logging.INFO
-    logging.basicConfig(
-        stream=sys.stderr,
-        level=level,
-        format="%(asctime)s %(name)-12s %(levelname)-8s %(message)s",
+
+    if not log_dir:
+        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(
+        log_dir, f"designatedlands_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     )
+
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.setLevel(logging.DEBUG)
+
+    formatter = logging.Formatter(
+        "%(asctime)s %(name)-12s %(levelname)-8s %(message)s"
+    )
+
+    # Keep console verbosity controlled by CLI flags.
+    console_handler = logging.StreamHandler(_ORIGINAL_STDERR)
+    console_handler.setLevel(level)
+    console_handler.setFormatter(formatter)
+
+    # Always keep file logging detailed for diagnostics.
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
+
+    logging.captureWarnings(True)
+
+    global _STDOUT_REDIRECTED
+    if not _STDOUT_REDIRECTED:
+        stdout_logger = logging.getLogger("stdout")
+        stderr_logger = logging.getLogger("stderr")
+        sys.stdout = _LoggerStream(stdout_logger, logging.INFO)
+        sys.stderr = _LoggerStream(stderr_logger, logging.ERROR)
+        _STDOUT_REDIRECTED = True
+
+    def _log_unhandled_exception(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            return sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        logging.getLogger(__name__).exception(
+            "Unhandled exception", exc_info=(exc_type, exc_value, exc_traceback)
+        )
+
+    sys.excepthook = _log_unhandled_exception
+    _enable_arcpy_tool_logging()
+
+    LOG.info("Detailed logging enabled. Log file: %s", log_path)
+    return log_path
+
+
+def log_arcpy_messages(context: str = ""):
+    """Write ArcPy geoprocessing messages to the logger."""
+    if not ARCPY_AVAILABLE:
+        return
+    try:
+        messages = arcpy.GetMessages()
+    except Exception as exc:
+        LOG.debug("Unable to retrieve ArcPy messages: %s", exc)
+        return
+
+    if not messages:
+        return
+
+    prefix = f"[arcpy:{context}] " if context else "[arcpy] "
+    for line in messages.splitlines():
+        line = line.strip()
+        if line:
+            LOG.info("%s%s", prefix, line)
+
+
+def _enable_arcpy_tool_logging():
+    """Wrap common ArcPy toolboxes so each geoprocessing call logs messages."""
+    global _ARCPY_TOOL_LOGGING_ENABLED
+    if _ARCPY_TOOL_LOGGING_ENABLED or not ARCPY_AVAILABLE:
+        return
+
+    def _wrap_toolbox(toolbox, toolbox_name: str):
+        for attr in dir(toolbox):
+            if attr.startswith("_"):
+                continue
+
+            try:
+                tool = getattr(toolbox, attr)
+            except Exception:
+                continue
+
+            if not callable(tool) or getattr(tool, "_dl_wrapped", False):
+                continue
+
+            @wraps(tool)
+            def _wrapped(*args, __tool=tool, __name=attr, **kwargs):
+                context = f"{toolbox_name}.{__name}"
+                try:
+                    result = __tool(*args, **kwargs)
+                except Exception:
+                    log_arcpy_messages(f"{context}-failed")
+                    raise
+                log_arcpy_messages(context)
+                return result
+
+            try:
+                _wrapped._dl_wrapped = True
+                setattr(toolbox, attr, _wrapped)
+            except Exception:
+                # Some ArcPy attributes are read-only and cannot be wrapped.
+                continue
+
+    for toolbox_name in ("management", "analysis", "conversion"):
+        toolbox = getattr(arcpy, toolbox_name, None)
+        if toolbox is not None:
+            _wrap_toolbox(toolbox, toolbox_name)
+
+    _ARCPY_TOOL_LOGGING_ENABLED = True
 
 
 # ---------------------------------------------------------------------------

@@ -17,9 +17,10 @@ Usage:
 
 import argparse
 import logging
+import os
 import sys
 
-from designatedlands import DesignatedLands, set_log_level
+from designatedlands import DesignatedLands, log_arcpy_messages, set_log_level
 
 LOG = logging.getLogger(__name__)
 
@@ -58,48 +59,60 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    set_log_level(args.verbose, args.quiet)
+    logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    log_path = set_log_level(args.verbose, args.quiet, log_dir=logs_dir)
+    LOG.info("Run log: %s", log_path)
+
+    def run_step(step_name, func):
+        try:
+            func()
+            log_arcpy_messages(step_name)
+        except Exception:
+            log_arcpy_messages(f"{step_name}-failed")
+            LOG.exception("Step failed: %s", step_name)
+            raise
 
     LOG.info("=== Initialising DesignatedLands ===")
     DL = DesignatedLands(config_file=args.config)
+    log_arcpy_messages("initialise")
 
     # 1. Test connection
     LOG.info("=== Step 1/7: test-connection ===")
-    DL.test_connection()
+    run_step("test-connection", DL.test_connection)
 
     # 2. Download
     if not args.skip_download:
         LOG.info("=== Step 2/7: download ===")
-        DL.download()
+        run_step("download", DL.download)
     else:
         LOG.info("=== Step 2/7: download (SKIPPED) ===")
 
     # 3. Preprocess
     LOG.info("=== Step 3/7: preprocess ===")
-    DL.preprocess()
-    DL.create_bc_boundary()
+    run_step("preprocess", DL.preprocess)
+    run_step("create-bc-boundary", DL.create_bc_boundary)
 
     # 4. Process vector
     LOG.info("=== Step 4/7: process-vector ===")
-    DL.create_designations_overlapping()
-    DL.create_designations_planarized()
+    run_step("designations-overlapping", DL.create_designations_overlapping)
+    run_step("designations-planarized", DL.create_designations_planarized)
 
     # 5. Process raster
     if not args.skip_raster:
         LOG.info("=== Step 5/7: process-raster ===")
-        DL.rasterize()
-        DL.overlay_rasters()
+        run_step("rasterize", DL.rasterize)
+        run_step("overlay-rasters", DL.overlay_rasters)
     else:
         LOG.info("=== Step 5/7: process-raster (SKIPPED) ===")
 
     # 6. Dump
     LOG.info("=== Step 6/7: dump ===")
-    DL.dump()
+    run_step("dump", DL.dump)
 
     # 7. Cleanup
     if not args.skip_cleanup:
         LOG.info("=== Step 7/7: cleanup ===")
-        DL.cleanup()
+        run_step("cleanup", DL.cleanup)
     else:
         LOG.info("=== Step 7/7: cleanup (SKIPPED) ===")
 
