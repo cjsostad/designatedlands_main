@@ -330,6 +330,12 @@ def download_bcgw_wfs(
         tf_path = tf.name
 
     try:
+        # Disable Z output so arcpy does not create a Z-enabled feature class.
+        # Without this, arcpy.conversion.JSONToFeatures raises ERROR 160660
+        # ("The Z domain on the spatial reference is not set or invalid") when
+        # the WFS response contains Z coordinates or a Z-capable CRS, even
+        # after coordinate-level stripping.
+        arcpy.env.outputZFlag = "Disabled"
         arcpy.conversion.JSONToFeatures(tf_path, out_fc)
         LOG.info("  Loaded %s into %s", package, out_fc)
     finally:
