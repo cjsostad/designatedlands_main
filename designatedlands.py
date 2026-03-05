@@ -308,8 +308,8 @@ def download_bcgw_wfs(
         LOG.warning("  No features returned for %s", package)
         return
 
-    # Strip Z coordinates — arcpy JSONToFeatures fails if the spatial reference
-    # has no Z domain, which is common with BCGW WFS responses.
+    # Strip Z/M coordinates and bbox metadata — JSONToFeatures can still infer
+    # 3D geometry from bbox arrays even after coordinates are flattened.
     def _drop_z(coords):
         if not coords:
             return coords
@@ -317,10 +317,14 @@ def download_bcgw_wfs(
             return coords[:2]
         return [_drop_z(c) for c in coords]
 
+    geojson_data.pop("bbox", None)
     for feature in geojson_data.get("features", []):
+        feature.pop("bbox", None)
         geom = feature.get("geometry")
-        if geom and "coordinates" in geom:
-            geom["coordinates"] = _drop_z(geom["coordinates"])
+        if geom:
+            geom.pop("bbox", None)
+            if "coordinates" in geom:
+                geom["coordinates"] = _drop_z(geom["coordinates"])
 
     # Write GeoJSON to a temp file and load with arcpy
     with tempfile.NamedTemporaryFile(
@@ -330,7 +334,8 @@ def download_bcgw_wfs(
         tf_path = tf.name
 
     try:
-        arcpy.conversion.JSONToFeatures(tf_path, out_fc)
+        with arcpy.EnvManager(outputZFlag="Disabled", outputMFlag="Disabled"):
+            arcpy.conversion.JSONToFeatures(tf_path, out_fc)
         LOG.info("  Loaded %s into %s", package, out_fc)
     finally:
         os.unlink(tf_path)
