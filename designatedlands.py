@@ -446,6 +446,23 @@ def download_bcgw_wfs(
     resp = requests.get(BCGW_WFS_URL, params=params, verify=False, timeout=300)
     resp.raise_for_status()
 
+    # GeoServer may return an OGC ExceptionReport as XML with HTTP 200 when a
+    # CQL filter references a non-existent field or contains a syntax error.
+    # Detect this early and raise a descriptive error instead of a cryptic
+    # JSONDecodeError from resp.json().
+    content_type = resp.headers.get("Content-Type", "")
+    if "json" not in content_type:
+        LOG.error(
+            "WFS returned a non-JSON response for '%s' (Content-Type: %s). "
+            "The layer name or CQL filter may be invalid. Response excerpt: %s",
+            package, content_type, resp.text[:500],
+        )
+        raise RuntimeError(
+            f"WFS returned a non-JSON response for '{package}'. "
+            f"Check that the layer name and CQL filter are valid. "
+            f"Response excerpt: {resp.text[:500]}"
+        )
+
     geojson_data = resp.json()
     feature_count = len(geojson_data.get("features", []))
     LOG.info("  Retrieved %d features", feature_count)
