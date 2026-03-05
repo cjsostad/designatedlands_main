@@ -413,10 +413,14 @@ def download_bcgw_wfs(
     out_fc: str,
     query: str = None,
     workspace: str = None,
+    page_size: int = 2000,
 ):
     """
     Download a BCGW layer via its public WFS endpoint and load it into
     an ArcGIS File Geodatabase feature class.
+
+    Handles WFS pagination automatically so all features are retrieved
+    even when the server's default page limit would otherwise truncate results.
 
     Parameters
     ----------
@@ -428,31 +432,93 @@ def download_bcgw_wfs(
         CQL filter string to pass to the WFS endpoint.
     workspace : str, optional
         GDB workspace path (used to derive schema if out_fc is relative).
+    page_size : int, optional
+        Number of features to request per WFS page. Default 2000.
     """
     LOG.info("Downloading BCGW layer: %s", package)
 
-    # Build WFS request — use GeoJSON output for easy loading
-    params = {
+    base_params = {
         "SERVICE": "WFS",
         "VERSION": "2.0.0",
         "REQUEST": "GetFeature",
         "typeName": package,
         "outputFormat": "application/json",
         "SRSNAME": "EPSG:3005",
+        "COUNT": page_size,
     }
     if query:
-        params["CQL_FILTER"] = query
+        base_params["CQL_FILTER"] = query
 
-    resp = requests.get(BCGW_WFS_URL, params=params, verify=False, timeout=300)
-    resp.raise_for_status()
+    all_features = []
+    start_index = 0
+    crs_info = None
 
-    geojson_data = resp.json()
-    feature_count = len(geojson_data.get("features", []))
-    LOG.info("  Retrieved %d features", feature_count)
+    while True:
+        params = dict(base_params)
+        params["STARTINDEX"] = start_index
 
-    if feature_count == 0:
+        resp = requests.get(BCGW_WFS_URL, params=params, verify=False, timeout=300)
+        resp.raise_for_status()
+
+        # Detect XML service exception — WFS servers sometimes return HTTP 200
+        # with an OGC ServiceException XML body when the request is invalid.
+        content_type = resp.headers.get("Content-Type", "")
+        if "xml" in content_type.lower() and "json" not in content_type.lower():
+            LOG.error(
+                "WFS returned XML (possible service exception) for %s: %.500s",
+                package,
+                resp.text,
+            )
+            raise RuntimeError(
+                f"WFS service exception for '{package}'. "
+                f"Verify the layer name and CQL_FILTER. "
+                f"Response snippet: {resp.text[:200]}"
+            )
+
+        try:
+            page_data = resp.json()
+        except ValueError as exc:
+            LOG.error(
+                "Failed to parse WFS response as JSON for %s: %s", package, exc
+            )
+            LOG.debug("Response text: %.500s", resp.text)
+            raise
+
+        page_features = page_data.get("features", [])
+        all_features.extend(page_features)
+
+        if crs_info is None:
+            crs_info = page_data.get("crs")
+
+        page_num = start_index // page_size + 1
+        LOG.info("  Page %d: got %d features (total so far: %d)", page_num, len(page_features), len(all_features))
+
+        # Stop if this page returned fewer features than requested (last page)
+        # or if we have reached the numberMatched total reported by the server.
+        number_matched = page_data.get("numberMatched")
+        if len(page_features) < page_size:
+            break
+        try:
+            if number_matched is not None and len(all_features) >= int(number_matched):
+                break
+        except (TypeError, ValueError):
+            pass  # numberMatched is "unknown" or non-integer — rely on page size check
+        start_index += page_size
+
+    total = len(all_features)
+    LOG.info("  Total retrieved: %d features for %s", total, package)
+
+    if total == 0:
         LOG.warning("  No features returned for %s", package)
         return
+
+    # Build a combined FeatureCollection from all pages
+    geojson_data = {
+        "type": "FeatureCollection",
+        "features": all_features,
+    }
+    if crs_info:
+        geojson_data["crs"] = crs_info
 
     # Strip Z/M coordinates and bbox metadata — JSONToFeatures can still infer
     # 3D geometry from bbox arrays even after coordinates are flattened.
@@ -464,7 +530,7 @@ def download_bcgw_wfs(
         return [_drop_z(c) for c in coords]
 
     geojson_data.pop("bbox", None)
-    for feature in geojson_data.get("features", []):
+    for feature in all_features:
         feature.pop("bbox", None)
         geom = feature.get("geometry")
         if geom:
