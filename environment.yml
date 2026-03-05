@@ -1,0 +1,19 @@
+name: designatedlands
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # ArcGIS Pro ships with its own Python environment (arcgispro-py3).
+  # Use that environment to run designatedlands.py — it includes:
+  #   arcpy, numpy, pandas, requests
+  #
+  # This environment.yml is preserved for reference only.
+  # To use the ArcGIS Pro environment, open:
+  #   Start > ArcGIS > Python Command Prompt
+  #
+  # If you want a standalone conda environment WITHOUT ArcGIS Pro
+  # (for testing non-arcpy parts of the script only):
+  - python=3.11
+  - numpy>=1.24
+  - pandas>=2.0
+  - requests>=2.28

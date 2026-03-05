@@ -1,0 +1,17 @@
+# Designatedlands — ArcGIS Pro Requirements
+#
+# This script runs in ArcGIS Pro's built-in Python environment (arcgispro-py3).
+# All required packages are already included with ArcGIS Pro:
+#
+#   arcpy      — included with ArcGIS Pro (not pip-installable)
+#   numpy      — bundled with arcgispro-py3
+#   pandas     — bundled with arcgispro-py3
+#   requests   — bundled with arcgispro-py3
+#
+# NO additional pip packages are required.
+#
+# To run this script, open the ArcGIS Pro Python Command Prompt:
+#   Start > ArcGIS > Python Command Prompt
+#
+# Then navigate to the project folder and run:
+#   python designatedlands.py --help
