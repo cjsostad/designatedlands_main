@@ -672,11 +672,12 @@ class DesignatedLands:
     def _read_sources(self):
         """Load designation and supporting source CSV files."""
         # --- Designations ---
-        designation_list = [
-            s
-            for s in csv.DictReader(open(self.config["sources_designations"]))
-            if s.get("exclude", "").strip() != "T"
-        ]
+        with open(self.config["sources_designations"], newline="", encoding="utf-8") as f:
+            designation_list = [
+                s
+                for s in csv.DictReader(f)
+                if s.get("exclude", "").strip() != "T"
+            ]
         self.sources = sorted(
             designation_list, key=lambda x: int(x["process_order"])
         )
@@ -723,7 +724,8 @@ class DesignatedLands:
             source["dl"] = f"dl_{source['process_order']}_{source['designation']}"[:60]
 
         # --- Supporting sources ---
-        supporting_list = list(csv.DictReader(open(self.config["sources_supporting"])))
+        with open(self.config["sources_supporting"], newline="", encoding="utf-8") as f:
+            supporting_list = list(csv.DictReader(f))
         for i, source in enumerate(supporting_list, start=len(self.sources) + 1):
             source["id"] = i
             source["process_order"] = "00"
@@ -1367,31 +1369,19 @@ class DesignatedLands:
         out_dir.mkdir(parents=True, exist_ok=True)
         out_gpkg = str(out_dir / "designatedlands.gpkg")
 
-        # arcpy can export to GeoPackage via conversion
-        for fc_name in ("designations_planarized", "designations_overlapping"):
-            fc_path = os.path.join(self.gdb, fc_name)
-            if not arcpy.Exists(fc_path):
-                LOG.warning("%s not found — skipping dump", fc_name)
-                continue
-            LOG.info("Dumping %s to %s", fc_name, out_gpkg)
-            arcpy.conversion.FeatureClassToFeatureClass(
-                fc_path,
-                os.path.dirname(out_gpkg),
-                fc_name,
-                # Note: True GeoPackage export requires arcpy.conversion.ExportFeatures
-                # or OGR. Use the GDB location + layer name here.
-            )
-
         # Export to GeoPackage using arcpy (ArcGIS Pro 3.x+)
         try:
             for fc_name in ("designations_planarized", "designations_overlapping"):
                 fc_path = os.path.join(self.gdb, fc_name)
                 if not arcpy.Exists(fc_path):
+                    LOG.warning("%s not found — skipping dump", fc_name)
                     continue
-                arcpy.conversion.ExportFeatures(fc_path, out_gpkg + f"\\{fc_name}")
+                out_layer_path = os.path.join(out_gpkg, fc_name)
+                LOG.info("Exporting %s to %s", fc_name, out_layer_path)
+                arcpy.conversion.ExportFeatures(fc_path, out_layer_path)
                 LOG.info("Exported %s to GeoPackage", fc_name)
         except AttributeError:
-            # ArcGIS Pro 2.x fallback: convert to shapefile in output dir
+            # ArcGIS Pro 2.x fallback: export feature classes to GeoJSON
             LOG.warning(
                 "arcpy.conversion.ExportFeatures not available (ArcGIS Pro 2.x). "
                 "Exporting feature classes to GeoJSON instead."
@@ -1399,6 +1389,7 @@ class DesignatedLands:
             for fc_name in ("designations_planarized", "designations_overlapping"):
                 fc_path = os.path.join(self.gdb, fc_name)
                 if not arcpy.Exists(fc_path):
+                    LOG.warning("%s not found — skipping dump", fc_name)
                     continue
                 out_json = str(out_dir / f"{fc_name}.geojson")
                 arcpy.conversion.FeaturesToJSON(
@@ -1453,7 +1444,7 @@ class DesignatedLands:
         # Export result
         out_dir = os.path.dirname(out_file) or "."
         try:
-            arcpy.conversion.ExportFeatures(overlay_tmp, out_file + f"\\{out_layer}")
+            arcpy.conversion.ExportFeatures(overlay_tmp, os.path.join(out_file, out_layer))
         except AttributeError:
             out_json = str(Path(out_dir) / f"{out_layer}.geojson")
             arcpy.conversion.FeaturesToJSON(overlay_tmp, out_json, geoJSON="GEOJSON")
@@ -1485,11 +1476,11 @@ class DesignatedLands:
     def test_connection(self):
         """Verify the GDB workspace is accessible."""
         if arcpy.Exists(self.gdb):
-            print(f"GDB workspace accessible: {self.gdb}")
+            LOG.info("GDB workspace accessible: %s", self.gdb)
             fcs = arcpy.ListFeatureClasses()
-            print(f"Feature classes found: {len(fcs) if fcs else 0}")
+            LOG.info("Feature classes found: %d", len(fcs) if fcs else 0)
         else:
-            print(f"GDB workspace NOT found: {self.gdb}")
+            LOG.warning("GDB workspace NOT found: %s", self.gdb)
 
 
 # ---------------------------------------------------------------------------
