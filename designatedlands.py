@@ -324,7 +324,7 @@ def download_file(url: str, path: str, filename: str, overwrite: bool = False):
         fp = tempfile.NamedTemporaryFile("wb", suffix=suffix, delete=False)
         try:
             if parsed.scheme in ("http", "https"):
-                resp = requests.get(url, stream=True, verify=False, timeout=120)
+                resp = requests.get(url, stream=True, verify=False, timeout=(30, 300))
                 resp.raise_for_status()
                 for chunk in resp.iter_content(chunk_size=8192):
                     fp.write(chunk)
@@ -580,8 +580,23 @@ def create_rat(raster_path: str, lookup: dict):
 class DesignatedLands:
     """Holds the job configuration, workspace, and all processing methods."""
 
-    def __init__(self, config_file=None):
+    def __init__(self, config_file=None, recent_only=False,
+                 start_date=None, end_date=None, exclude_federal=False):
         LOG.info("Initializing DesignatedLands")
+
+        # Date filter settings
+        self.recent_only = recent_only
+        self.start_date = start_date or "2025-04-01"
+        self.end_date = end_date or date.today().isoformat()
+        self.exclude_federal = exclude_federal
+        self.federal_excluded_sources = []  # populated by _read_sources
+        if self.recent_only:
+            LOG.info(
+                "Date filter ENABLED: %s to %s",
+                self.start_date, self.end_date,
+            )
+        if self.exclude_federal:
+            LOG.info("Federal layers will be EXCLUDED")
 
         if not ARCPY_AVAILABLE:
             raise RuntimeError(
@@ -608,7 +623,7 @@ class DesignatedLands:
         arcpy.env.parallelProcessingFactor = str(self.config["n_processes"])
 
         # Initialize File Geodatabase workspace
-        self.gdb = self.config["gdb_path"]
+        self.gdb = os.path.abspath(self.config["gdb_path"])
         self._init_workspace()
 
         # Set arcpy environment
@@ -681,6 +696,26 @@ class DesignatedLands:
             designation_list, key=lambda x: int(x["process_order"])
         )
 
+        # Validate before any filtering removes sources
+        self._validate_sources()
+
+        # Exclude federal sources if requested
+        if self.exclude_federal:
+            kept = []
+            for source in self.sources:
+                if source.get("jurisdiction", "").strip().lower() == "federal":
+                    LOG.info(
+                        "Federal exclusion: REMOVING '%s'",
+                        source.get("name", ""),
+                    )
+                    self.federal_excluded_sources.append({
+                        "name": source.get("name", "").strip(),
+                        "designation": source.get("designation", "").strip(),
+                    })
+                else:
+                    kept.append(source)
+            self.sources = kept
+
         # Tidy strings
         str_cols = [
             "designation", "source_id_col", "source_name_col",
@@ -690,9 +725,6 @@ class DesignatedLands:
             for col in str_cols:
                 source[col] = source.get(col, "").strip()
 
-        # Validate
-        self._validate_sources()
-
         # Build designations summary (unique process_order + designation)
         self.designations = (
             pd.DataFrame(self.sources)
@@ -701,6 +733,40 @@ class DesignatedLands:
             .sort_values("process_order")
             .to_dict("records")
         )
+
+        # Apply date filter if enabled
+        if self.recent_only:
+            from date_filter import apply_date_filter_to_query, NO_DATE_FIELD, NON_BCGW
+            filtered_sources = []
+            for source in self.sources:
+                template = source.get("date_filter_query", "").strip()
+                if template in (NO_DATE_FIELD, NON_BCGW, ""):
+                    LOG.info(
+                        "Date filter: EXCLUDING '%s' (%s)",
+                        source.get("name", ""), template or "no date_filter_query",
+                    )
+                    continue
+                # Resolve placeholders and merge into existing query
+                try:
+                    date_cql = template.format(
+                        start_date=self.start_date,
+                        end_date=self.end_date,
+                    )
+                except KeyError:
+                    LOG.warning(
+                        "Date filter: bad placeholder in '%s' — skipping",
+                        source.get("name", ""),
+                    )
+                    continue
+                source["query"] = apply_date_filter_to_query(
+                    source.get("query", ""), date_cql,
+                )
+                LOG.info(
+                    "Date filter: '%s' -> %s",
+                    source.get("name", ""), source["query"],
+                )
+                filtered_sources.append(source)
+            self.sources = filtered_sources
 
         # Enrich each source with computed fields
         for i, source in enumerate(self.sources, start=1):
@@ -717,7 +783,7 @@ class DesignatedLands:
             ]
             source["process_order"] = str(source["process_order"]).zfill(2)
             # Feature class names (max 64 chars, no spaces)
-            base = f"src_{str(i).zfill(2)}_{source['designation']}"[:60]
+            base = f"src_{source['process_order']}_{source['designation']}"[:60]
             source["src"] = base
             source["preprc"] = base + "_pp"  # preprocessed
             source["dl"] = f"dl_{source['process_order']}_{source['designation']}"[:60]
@@ -1068,11 +1134,18 @@ class DesignatedLands:
     def create_designations_planarized(self):
         """
         From designations_overlapping, remove overlaps using Union + ranking.
-        Each output polygon receives the highest-precedence (highest process_order)
-        designation that covers it, with the maximum restriction values.
 
-        This replaces the PostGIS planarize approach with an arcpy Union + dissolve
-        approach. Overlapping designations are noted in semicolon-delimited fields.
+        Union splits all polygons at every intersection boundary, creating
+        planar topology.  Where designations overlap, the Union output
+        contains multiple rows with identical geometry but different
+        attributes.  This method groups those spatially identical fragments
+        and for each group:
+          - assigns the designation with the LOWEST process_order
+            (= highest priority)
+          - retains the MAXIMUM restriction value for each industry
+            across all overlapping designations
+          - records ALL contributing designation names in a semicolon-
+            delimited ``overlapping_designations`` field
         """
         LOG.info("Creating designations_planarized")
         overlapping_fc = os.path.join(self.gdb, "designations_overlapping")
@@ -1084,9 +1157,17 @@ class DesignatedLands:
         # Union all overlapping features to create planar topology
         union_tmp = os.path.join(self.gdb, "planar_union_tmp")
         if arcpy.Exists(union_tmp):
-            arcpy.management.Delete(union_tmp)
+            try:
+                arcpy.management.Delete(union_tmp)
+            except Exception:
+                LOG.warning(
+                    "Cannot delete corrupted %s — compacting GDB and retrying",
+                    union_tmp,
+                )
+                arcpy.management.Compact(self.gdb)
+                arcpy.management.Delete(union_tmp)
 
-        LOG.info("Running Union to remove overlaps...")
+        LOG.info("Running Union to create planar topology...")
         arcpy.analysis.Union([overlapping_fc], union_tmp, "ALL")
 
         # Create output feature class
@@ -1100,6 +1181,7 @@ class DesignatedLands:
         planar_fields = [
             ("process_order", "SHORT", None),
             ("designation", "TEXT", 255),
+            ("overlapping_designations", "TEXT", 1000),
             ("source_id", "TEXT", 255),
             ("source_name", "TEXT", 255),
             ("forest_restriction_max", "SHORT", None),
@@ -1112,41 +1194,14 @@ class DesignatedLands:
             else:
                 arcpy.management.AddField(out_fc, fname, ftype)
 
-        # For each output polygon, pick highest process_order designation
-        # and maximum restriction values
-        union_fields = [
-            "FID_designations_overlapping",
-            "process_order", "designation", "source_id", "source_name",
-            "forest_restriction", "og_restriction", "mine_restriction",
-            "SHAPE@",
-        ]
         out_fields = [
-            "process_order", "designation", "source_id", "source_name",
+            "process_order", "designation", "overlapping_designations",
+            "source_id", "source_name",
             "forest_restriction_max", "mine_restriction_max", "og_restriction_max",
             "SHAPE@",
         ]
 
-        LOG.info("Aggregating planarized features...")
-        # Group by geometry OID — use dissolve approach
-        # Dissolve on geometry, picking max values
-        dissolve_tmp = os.path.join(self.gdb, "planar_dissolve_tmp")
-        if arcpy.Exists(dissolve_tmp):
-            arcpy.management.Delete(dissolve_tmp)
-
-        arcpy.management.Dissolve(
-            union_tmp,
-            dissolve_tmp,
-            dissolve_field=None,
-            statistics_fields=[
-                ["process_order", "MAX"],
-                ["forest_restriction", "MAX"],
-                ["og_restriction", "MAX"],
-                ["mine_restriction", "MAX"],
-            ],
-        )
-
-        # Join back to get designation name for max process_order
-        # Build lookup from (process_order -> designation, source_id, source_name)
+        # Build lookup: process_order -> designation info
         po_lookup = {}
         for s in self.sources:
             po = int(s["process_order"])
@@ -1157,37 +1212,112 @@ class DesignatedLands:
                     "source_name": "",
                 }
 
-        with arcpy.da.InsertCursor(out_fc, out_fields) as i_cur:
-            with arcpy.da.SearchCursor(
-                dissolve_tmp,
-                [
-                    "MAX_process_order",
-                    "MAX_forest_restriction",
-                    "MAX_og_restriction",
-                    "MAX_mine_restriction",
-                    "SHAPE@",
-                ],
-            ) as s_cur:
-                for row in s_cur:
-                    max_po, max_fr, max_og, max_mr, geom = row
-                    if geom is None or geom.area == 0:
-                        continue
-                    info = po_lookup.get(int(max_po) if max_po else 0, {})
-                    i_cur.insertRow([
-                        max_po,
-                        info.get("designation", ""),
-                        info.get("source_id", ""),
-                        info.get("source_name", ""),
-                        max_fr,
-                        max_mr,
-                        max_og,
-                        geom,
-                    ])
+        # -----------------------------------------------------------------
+        # Aggregate Union fragments
+        # -----------------------------------------------------------------
+        # After Union, overlapping areas produce multiple rows with
+        # identical geometry but different attributes (one per
+        # contributing input polygon).  We group these spatially
+        # identical fragments using a composite key of centroid
+        # coordinates + area + perimeter (high-precision rounding),
+        # then for each group:
+        #   - pick MIN(process_order)  →  designation (highest priority)
+        #   - pick MAX of each restriction field
+        #   - collect ALL designation names  →  overlapping_designations
+        #
+        # The grouping key does NOT modify geometry — the original Union
+        # geometry is passed through unchanged, so polygon areas remain
+        # perfectly accurate.
+        # -----------------------------------------------------------------
+        LOG.info("Reading Union fragments and grouping by spatial location...")
+        groups = {}
+        read_fields = [
+            "process_order", "designation",
+            "forest_restriction", "og_restriction", "mine_restriction",
+            "SHAPE@",
+        ]
+        frag_count = 0
 
+        with arcpy.da.SearchCursor(union_tmp, read_fields) as cur:
+            for po, desig, fr, og, mr, geom in cur:
+                if geom is None or geom.area == 0:
+                    continue
+                if po is None or int(po) <= 0:
+                    continue
+
+                frag_count += 1
+                po = int(po)
+                fr = fr if fr is not None else 0
+                og = og if og is not None else 0
+                mr = mr if mr is not None else 0
+                desig = desig or ""
+
+                # Composite key: centroid X/Y (7 dp ≈ 0.01 m in BC Albers)
+                # + area (2 dp) + perimeter (2 dp) to minimise collision
+                # risk between genuinely different polygons.
+                c = geom.trueCentroid
+                key = (
+                    round(c.X, 7),
+                    round(c.Y, 7),
+                    round(geom.area, 2),
+                    round(geom.length, 2),
+                )
+
+                if key not in groups:
+                    groups[key] = {
+                        "min_po": po,
+                        "max_fr": fr,
+                        "max_og": og,
+                        "max_mr": mr,
+                        "designations": [desig],
+                        "geom": geom,
+                    }
+                else:
+                    g = groups[key]
+                    g["min_po"] = min(g["min_po"], po)
+                    g["max_fr"] = max(g["max_fr"], fr)
+                    g["max_og"] = max(g["max_og"], og)
+                    g["max_mr"] = max(g["max_mr"], mr)
+                    if desig and desig not in g["designations"]:
+                        g["designations"].append(desig)
+
+        LOG.info(
+            "Grouped %d Union fragments into %d unique planar polygons",
+            frag_count, len(groups),
+        )
+
+        # Insert aggregated results into the output feature class
+        LOG.info("Writing planarized features...")
+        with arcpy.da.InsertCursor(out_fc, out_fields) as i_cur:
+            for data in groups.values():
+                info = po_lookup.get(data["min_po"], {})
+                # Sort overlapping designations by process_order for
+                # consistent display (lowest order = highest priority first)
+                all_desigs = sorted(
+                    data["designations"],
+                    key=lambda d: next(
+                        (int(s["process_order"]) for s in self.sources
+                         if s["designation"] == d),
+                        999,
+                    ),
+                )
+                overlapping_str = "; ".join(all_desigs)
+                i_cur.insertRow([
+                    data["min_po"],
+                    info.get("designation", ""),
+                    overlapping_str,
+                    info.get("source_id", ""),
+                    info.get("source_name", ""),
+                    data["max_fr"],
+                    data["max_mr"],
+                    data["max_og"],
+                    data["geom"],
+                ])
+
+        # Clean up temporary data
         arcpy.management.Delete(union_tmp)
-        arcpy.management.Delete(dissolve_tmp)
         arcpy.management.AddSpatialIndex(out_fc)
-        LOG.info("designations_planarized created")
+        LOG.info("designations_planarized created with %d features", len(groups))
 
     # ------------------------------------------------------------------
     # Raster processing
@@ -1362,49 +1492,29 @@ class DesignatedLands:
     # ------------------------------------------------------------------
 
     def dump(self):
-        """Export output feature classes to a GeoPackage."""
-        out_dir = Path(self.config["out_path"])
+        """Export output feature classes to a File Geodatabase."""
+        out_dir = Path(self.config["out_path"]).resolve()
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_gpkg = str(out_dir / "designatedlands.gpkg")
+        out_gdb_name = "designatedlands_output.gdb"
+        out_gdb = str(out_dir / out_gdb_name)
 
-        # arcpy can export to GeoPackage via conversion
+        if not arcpy.Exists(out_gdb):
+            arcpy.management.CreateFileGDB(str(out_dir), out_gdb_name)
+            LOG.info("Created output File Geodatabase: %s", out_gdb)
+
         for fc_name in ("designations_planarized", "designations_overlapping"):
             fc_path = os.path.join(self.gdb, fc_name)
             if not arcpy.Exists(fc_path):
                 LOG.warning("%s not found — skipping dump", fc_name)
                 continue
-            LOG.info("Dumping %s to %s", fc_name, out_gpkg)
+            out_fc = os.path.join(out_gdb, fc_name)
+            if arcpy.Exists(out_fc):
+                arcpy.management.Delete(out_fc)
+            LOG.info("Dumping %s to %s", fc_name, out_gdb)
             arcpy.conversion.FeatureClassToFeatureClass(
-                fc_path,
-                os.path.dirname(out_gpkg),
-                fc_name,
-                # Note: True GeoPackage export requires arcpy.conversion.ExportFeatures
-                # or OGR. Use the GDB location + layer name here.
+                fc_path, out_gdb, fc_name,
             )
-
-        # Export to GeoPackage using arcpy (ArcGIS Pro 3.x+)
-        try:
-            for fc_name in ("designations_planarized", "designations_overlapping"):
-                fc_path = os.path.join(self.gdb, fc_name)
-                if not arcpy.Exists(fc_path):
-                    continue
-                arcpy.conversion.ExportFeatures(fc_path, out_gpkg + f"\\{fc_name}")
-                LOG.info("Exported %s to GeoPackage", fc_name)
-        except AttributeError:
-            # ArcGIS Pro 2.x fallback: convert to shapefile in output dir
-            LOG.warning(
-                "arcpy.conversion.ExportFeatures not available (ArcGIS Pro 2.x). "
-                "Exporting feature classes to GeoJSON instead."
-            )
-            for fc_name in ("designations_planarized", "designations_overlapping"):
-                fc_path = os.path.join(self.gdb, fc_name)
-                if not arcpy.Exists(fc_path):
-                    continue
-                out_json = str(out_dir / f"{fc_name}.geojson")
-                arcpy.conversion.FeaturesToJSON(
-                    fc_path, out_json, geoJSON="GEOJSON"
-                )
-                LOG.info("Exported %s to %s", fc_name, out_json)
+            LOG.info("Exported %s to output GDB", fc_name)
 
     # ------------------------------------------------------------------
     # Overlay
@@ -1450,14 +1560,15 @@ class DesignatedLands:
             arcpy.management.Delete(overlay_tmp)
         arcpy.analysis.Intersect([tmp_fc, dl_fc], overlay_tmp)
 
-        # Export result
-        out_dir = os.path.dirname(out_file) or "."
-        try:
-            arcpy.conversion.ExportFeatures(overlay_tmp, out_file + f"\\{out_layer}")
-        except AttributeError:
-            out_json = str(Path(out_dir) / f"{out_layer}.geojson")
-            arcpy.conversion.FeaturesToJSON(overlay_tmp, out_json, geoJSON="GEOJSON")
-            LOG.info("Overlay result written to %s", out_json)
+        # Export result to File Geodatabase
+        out_file = os.path.abspath(out_file)
+        out_dir = os.path.dirname(out_file)
+        if not arcpy.Exists(out_file):
+            arcpy.management.CreateFileGDB(out_dir, os.path.basename(out_file))
+        arcpy.conversion.FeatureClassToFeatureClass(
+            overlay_tmp, out_file, out_layer,
+        )
+        LOG.info("Overlay result written to %s\\%s", out_file, out_layer)
 
         # Clean up temp layers
         arcpy.management.Delete(tmp_fc)
@@ -1513,6 +1624,22 @@ def build_parser():
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress output")
+    parser.add_argument(
+        "--recent-only", action="store_true",
+        help="Enable date filtering — only process features changed in the date window",
+    )
+    parser.add_argument(
+        "--start-date", metavar="YYYY-MM-DD", default=None,
+        help="Start date for the filter window (default: 2025-04-01)",
+    )
+    parser.add_argument(
+        "--end-date", metavar="YYYY-MM-DD", default=None,
+        help="End date for the filter window (default: today)",
+    )
+    parser.add_argument(
+        "--exclude-federal", action="store_true",
+        help="Exclude all federally protected areas from the output",
+    )
 
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1535,12 +1662,12 @@ def build_parser():
     sub.add_parser("process-raster", help="Create raster designation/restriction layers")
 
     # dump
-    sub.add_parser("dump", help="Dump output feature classes to GeoPackage")
+    sub.add_parser("dump", help="Dump output feature classes to File Geodatabase")
 
     # overlay
     ov = sub.add_parser("overlay", help="Intersect a layer with designatedlands")
     ov.add_argument("in_file", help="Input vector file")
-    ov.add_argument("out_file", help="Output GeoPackage path")
+    ov.add_argument("out_file", help="Output File Geodatabase path")
     ov.add_argument("--in_layer", "-l", help="Layer name in input file")
     ov.add_argument("--out_layer", "-nln", help="Output layer name")
 
@@ -1556,7 +1683,13 @@ def main():
 
     set_log_level(args.verbose, args.quiet)
 
-    DL = DesignatedLands(config_file=args.config)
+    DL = DesignatedLands(
+        config_file=args.config,
+        recent_only=args.recent_only,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        exclude_federal=args.exclude_federal,
+    )
 
     cmd = args.command
 
@@ -1566,6 +1699,25 @@ def main():
     elif cmd == "download":
         DL.download(designation=getattr(args, "designation", None),
                     overwrite=args.overwrite)
+        if DL.recent_only:
+            from date_filter import run_report
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            xlsx_path = os.path.join(
+                script_dir, "outputs", "designated_lands_pipeline_report.xlsx",
+            )
+            pipeline_options = {
+                "recent_only": DL.recent_only,
+                "exclude_federal": DL.exclude_federal,
+                "start_date": DL.start_date,
+                "end_date": DL.end_date,
+            }
+            run_report(
+                DL.start_date, DL.end_date,
+                xlsx_path=xlsx_path, avoid_overwrite=True,
+                exclude_federal=DL.exclude_federal,
+                federal_excluded=DL.federal_excluded_sources,
+                pipeline_options=pipeline_options,
+            )
 
     elif cmd == "preprocess":
         DL.preprocess(designation=getattr(args, "designation", None))

@@ -1,358 +1,555 @@
 [![img](https://img.shields.io/badge/Lifecycle-Stable-97ca00)](https://github.com/bcgov/repomountie/blob/master/doc/lifecycle-badges.md)[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 
-# designatedlands
+# Designated Lands — ArcGIS Pro Edition
 
-Combine spatial data for 40+ designations that contribute to land management to create a single 'Designated Lands' layer for British Columbia. Land designations are categorized according to the industries to which they apply (forestry, oil and gas, and mining), and summarized according to the level of restriction that applies to each industry (Full, High, Medium, Low, None).  Overlaps are removed such that areas with overlapping designations are assigned to the highest category.
+Combine spatial data for 40+ land and marine designations across British Columbia into a single unified *Designated Lands* dataset using **ArcGIS Pro** and **arcpy**. Each designation is categorized by the level of restriction it imposes on three industry sectors — forestry, oil & gas, and mining — at five levels: **Protected**, **Full**, **High**, **Medium**, **Low**, and **None**.
 
-This is an updated version of the code, currently being run with the included `config_202-10-08.cfg` - this sets the resolution of the raster outputs to 25m.
+This is a re-implementation of the [original designatedlands tool](https://github.com/bcgov/designatedlands) (which used PostgreSQL/PostGIS). This version replaces the database backend with Esri **File Geodatabases** and arcpy geoprocessing, making it runnable on any workstation with an ArcGIS Pro license.
 
-A complete run of the [previous version of the tool](https://github.com/bcgov/designatedlands/releases/tag/v0.1.0) was completed May 2018, and the results are reported on [Environmental Reporting BC](http://www.env.gov.bc.ca/soe/indicators/land/land-designations.html), with the data available throught the [BC Data Catalogue](https://catalogue.data.gov.bc.ca/dataset/e0b30537-5498-437b-b668-9fafe44bf903).
 
+---
+
+## Methodology
+
+### Objective
+
+The purpose of this analysis is to consolidate British Columbia's many overlapping protected-area and resource-management designations into a single, authoritative spatial dataset that answers two questions for any point in the province:
+
+1. **Which designations apply here?** (overlapping output)
+2. **Which designation takes precedence?** (planarized output)
+
+The resulting datasets support land-use planning, cumulative-effects assessment, and natural-resource decision-making across the forestry, oil & gas, and mining sectors.
+
+### Data Compilation
+
+Forty-two designation layers are compiled from two categories of sources:
+
+- **BC Geographic Warehouse (BCGW)** — The majority of layers are downloaded programmatically from the province's public Web Feature Service (WFS) endpoint. Each layer is defined in `sources_designations.csv` with a BC Data Catalogue URL, an optional CQL query filter to select the relevant subset of features, and an optional date-filter template for change-detection workflows.
+- **External / federal sources** — A small number of layers (National Parks, National Wildlife Areas, Migratory Bird Sanctuaries, Great Bear Rainforest schedules, Flathead watershed) are downloaded from federal or non-BCGW repositories and stored locally in `source_data/`.
+
+All source data is reprojected to **NAD 1983 BC Environment Albers (EPSG:3005)** and loaded into a working File Geodatabase. Per-source preprocessing (spatial clips, attribute-based dissolves) is applied where required, as defined in the CSV configuration.
+
+### Priority System
+
+Each designation is assigned a `process_order` — a positive integer that establishes its **priority** relative to all other designations. A **lower** `process_order` indicates **higher** priority. The ordering reflects the relative stringency and legal standing of each designation:
+
+| Priority tier | process_order range | Examples |
+|---------------|---------------------|----------|
+| Highest | 1–6 | National Parks, Ecological Reserves, Provincial Parks, Conservancies, Protected Areas, Recreation Areas |
+| High | 7–15 | Wildlife Management Areas, National Wildlife Areas, Mineral Reserves, Ungulate Winter Range (No Harvest) |
+| Medium | 16–31 | Wildland Areas, Mining & Tourism Areas, Old Growth Management Areas, VQO Preserves/Retention, UWR/WHA Conditional Harvest |
+| Low | 32–42 | VQO Partial Retention/Modify/Max Modify, Community Watersheds, Fisheries Sensitive Watersheds, Great Bear EBM Areas, Haida Gwaii EBM Areas |
+
+This ordering is maintained in `sources_designations.csv` and is the primary mechanism for resolving spatial overlaps in the planarized output.
+
+### Restriction Classification
+
+Each designation carries an analyst-defined restriction rating for three resource industries: **forestry**, **oil & gas**, and **mining**. These ratings are based on the legislation, regulation, or management plan governing each designation and are expressed on a six-level ordinal scale:
+
+| Level | Integer code | Interpretation |
+|-------|--------------|----------------|
+| **Protected** | 5 | Fully protected from industrial activity by statute |
+| **Full** | 4 | Full restriction — industrial activity prohibited under current management framework |
+| **High** | 3 | High restriction — activity may be permitted under limited, tightly controlled conditions |
+| **Medium** | 2 | Moderate restriction — activity generally requires special approval or conditions |
+| **Low** | 1 | Low restriction — activity is broadly permissible with standard regulatory requirements |
+| **None** | 0 | No restriction imposed by this designation |
+
+The restriction values are maintained as text labels in the source CSV and converted to integer codes at runtime. They are **not** derived from any external GIS layer or database — they represent an analytical judgment by the project team based on policy review.
+
+### Overlapping Output
+
+The first analytical product, `designations_overlapping`, is produced by clipping each of the 42 designation layers to British Columbia's terrestrial and marine boundary and inserting them into a single feature class. Overlaps between different designations are **preserved** — a single geographic area may carry attributes from multiple designation polygons stacked on top of each other. This output is suitable for queries such as *"list all designations that apply to this parcel."*
+
+### Planarized Output
+
+The second analytical product, `designations_planarized`, resolves all overlaps to produce a **non-overlapping (planar)** layer. The method is:
+
+1. **Union**: All polygons from `designations_overlapping` are passed through an ArcGIS `Union` operation. This splits every polygon at every intersection boundary, creating planar topology. Where *n* designations overlap, the Union produces *n* rows sharing geometrically identical polygon fragments — each row carrying the attributes of one contributing designation.
+
+2. **Fragment grouping**: The Union fragments are grouped by spatial identity using a composite key of centroid coordinates (X and Y to 7 decimal places, ≈ 0.01 m precision in BC Albers), polygon area (2 decimal places), and polygon perimeter (2 decimal places). This key uniquely identifies each geometrically distinct fragment without modifying or simplifying the geometry — all original polygon boundaries from the Union are carried forward unchanged, preserving area accuracy.
+
+3. **Priority resolution**: For each group of spatially identical fragments:
+   - The **designation** is assigned from the fragment with the **lowest `process_order`** (highest priority). For example, where a Provincial Park (process_order 3) overlaps an Old Growth Management Area (process_order 19), the polygon is attributed as `park_provincial`.
+   - The **restriction values** are set to the **maximum** across all overlapping designations for each industry, so the most restrictive rating always prevails. For example, if one overlapping designation has `forest_restriction = 3` (High) and another has `forest_restriction = 5` (Protected), the output polygon receives `forest_restriction_max = 5`.
+   - An **`overlapping_designations`** field records the codes of **all** contributing designations as a semicolon-delimited string, sorted by `process_order` (e.g., `park_provincial; ogma_legal; vqo_retain`). This preserves the information about which designations were present before priority resolution collapsed them to a single attribution.
+
+4. **Output generation**: The grouped results are written to the `designations_planarized` feature class using an `InsertCursor`, with a spatial index built for query performance.
+
+The planarized output guarantees that every point in BC falls within **at most one** designation polygon, making it suitable for area-based reporting, cartographic display, and industry-sector restriction mapping.
+
+### Federal Exclusion
+
+Three of the 42 designation layers originate from **federal** jurisdiction (National Parks, National Wildlife Areas, Migratory Bird Sanctuaries). Because this analysis focuses on **provincially-managed** lands and the federal sources are drawn from a separate data repository with different update cycles, these layers are excluded by default. The `jurisdiction` column in the source CSV identifies federal sources, and the `--exclude-federal` / `--no-exclude-federal` flag controls their inclusion at runtime. Excluding federal sources does not affect the process_order numbering of remaining layers — the original ordinal values are preserved to maintain consistency across runs.
+
+### Date-Based Change Detection
+
+An optional date-filter mode (`--recent-only`) restricts the analysis to designations established or modified within a specified time window. Each source row in the CSV defines a `date_filter_query` template (e.g., `ESTABLISHMENT_DATE >= '{start_date}'`) that is injected into the WFS CQL filter at download time. Sources without a date-filterable attribute (noted as *"no date field available"* or *"non-BCGW source"*) are excluded from date-filtered runs. An xlsx report is generated summarising the changes, excluded layers, feature counts, and pipeline options used.
+
+### Limitations
+
+- **Restriction ratings are analyst-defined** — they represent informed professional judgment based on policy review, not a legally authoritative determination. Users should consult the underlying legislation and management plans for site-specific decisions.
+- **Temporal snapshot** — the dataset reflects the state of BCGW data at the time of download. Designations may have been added, modified, or removed since the last run.
+- **Spatial precision** — the fragment-grouping method uses high-precision rounding (7 decimal places for centroid coordinates in BC Albers) to identify geometrically identical Union fragments. In extremely rare edge cases, two genuinely different polygons with nearly identical centroids, areas, and perimeters could theoretically be grouped together; however, this has not been observed in practice with the current source data.
+- **Marine extent** — the analysis includes marine areas (marine ecosections and ABMS boundary) in the clipping boundary, so some designations may extend offshore. Users interested in terrestrial-only results should apply a post-processing clip to the land boundary.
+
+
+---
+
+## Geoprocessing Overview
+
+### What the pipeline produces
+
+The pipeline combines roughly 40 provincial designation layers (parks, conservancies, wildlife management areas, old-growth management areas, etc.) into **two output feature classes**, both projected in **BC Albers (EPSG:3005)**:
+
+| Output | Description |
+|--------|-------------|
+| **designations_overlapping** | Every designation polygon clipped to BC's terrestrial boundary and stacked. Polygons from different sources can overlap — a single geographic area may carry attributes from multiple designations. |
+| **designations_planarized** | A non-overlapping (planar) layer derived from the overlapping output. Where designations overlap, the polygon is assigned to the designation with the **lowest `process_order`** (highest priority). Adjacent polygons of the same designation are dissolved together. |
+
+### Coordinate system
+
+All processing is performed in **NAD 1983 BC Environment Albers (EPSG:3005)**, the standard provincial projection for BC government spatial analysis.
+
+### Data sources
+
+- **BC Geographic Warehouse (BCGW)**: Most designation layers are downloaded automatically via the province's public **WFS endpoint** (`https://openmaps.gov.bc.ca/geo/pub/wfs`). The pipeline resolves BC Data Catalogue URLs to WFS layer names and fetches GeoJSON features with optional CQL query filters.
+- **Manual downloads**: A few sources (e.g., private conservation lands) are not available via WFS. These are placed in the `source_data/` folder and referenced from the CSV.
+
+### Federal exclusion
+
+Three designation layers originate from federal jurisdiction:
+
+| process_order | Designation |
+|---------------|-------------|
+| 1 | National Parks (Administered Lands) |
+| 10 | National Wildlife Areas |
+| 12 | Migratory Bird Sanctuaries |
+
+By default these are **excluded** (`--exclude-federal`, enabled by default) because this analysis focuses on provincially-managed lands. Use `--no-exclude-federal` to include them.
+
+### Restriction levels
+
+Each designation carries restriction ratings for three resource industries (`forest_restriction`, `og_restriction`, `mine_restriction`). These values are **analyst-defined classifications** maintained as text labels in `sources_designations.csv` — each of the 42 source rows specifies a restriction level for forestry, oil & gas, and mining based on the policy or legislation governing that designation. At runtime, `designatedlands.py` converts the text labels to integer codes using a lookup dictionary defined in the `DesignatedLands.__init__()` constructor:
+
+| Level | Code | Meaning |
+|-------|------|---------|
+| Protected | 5 | Fully protected from industrial activity |
+| Full | 4 | Full restriction on the given industry |
+| High | 3 | High restriction |
+| Medium | 2 | Medium restriction |
+| Low | 1 | Low restriction |
+| None | 0 | No restriction |
+
+No external GIS layer or database table defines these values — they originate entirely from the CSV and are encoded into the output feature class attributes during the `create_designations_overlapping()` step.
+
+In the planarized output, where multiple designations overlap, the **maximum** restriction value for each industry is retained (highest restriction wins).
+
+
+---
+
+## Geoprocessing Workflow
+
+The pipeline runs seven sequential steps. Each step builds on the outputs of the previous one.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  1. TEST CONNECTION   Verify working GDB is accessible             │
+├─────────────────────────────────────────────────────────────────────┤
+│  2. DOWNLOAD          Fetch each layer from BCGW WFS → GDB FCs    │
+│                       (skip layers already present in GDB)         │
+├─────────────────────────────────────────────────────────────────────┤
+│  3. PREPROCESS        Clip / dissolve per-source as needed;        │
+│                       merge land + marine → bc_boundary            │
+├─────────────────────────────────────────────────────────────────────┤
+│  4. PROCESS VECTOR    4a. designations_overlapping (clip & stack)  │
+│                       4b. designations_planarized  (Union→Dissolve)│
+├─────────────────────────────────────────────────────────────────────┤
+│  5. PROCESS RASTER    (Optional) PolygonToRaster → overlay TIFs   │
+├─────────────────────────────────────────────────────────────────────┤
+│  6. DUMP              Export FCs → output File Geodatabase          │
+├─────────────────────────────────────────────────────────────────────┤
+│  7. CLEANUP           Delete intermediate src_* / *_pp FCs         │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Step 1 — Test Connection
+
+Verifies the working File Geodatabase (`designatedlands.gdb`) is accessible and lists the feature classes currently in it. Catches connection problems before spending time on downloads.
+
+### Step 2 — Download
+
+For each source row in the CSV:
+
+1. **Resolve** the BC Data Catalogue URL to a WFS layer name (e.g., `WHSE_TANTALIS.TA_PARK_ECORES_PA_SVW`).
+2. **Fetch** features from the BCGW WFS endpoint as GeoJSON, applying any CQL query filter defined in the CSV.
+3. **Convert** the GeoJSON to a feature class in the working GDB using `arcpy.conversion.JSONToFeatures`.
+4. **Name** the feature class using the stable `process_order` value from the CSV (e.g., `src_02_park_er`), so that re-runs with different filter flags still match existing FCs and skip re-downloading.
+
+For manual sources (`manual_download = T`), the data is loaded from local files in `source_data/` using `arcpy.conversion.FeatureClassToFeatureClass`.
+
+Supporting layers (BCGS 1:20k tiles, BC boundary polygons, marine ecosections) are also downloaded here.
+
+### Step 3 — Preprocess
+
+Applies per-source preprocessing operations defined in the CSV:
+
+- **Clip**: Clip a source FC by another FC (e.g., clip NGO conservation lands by `mk_boundary` to restrict to the Muskwa-Kechika Management Area).
+- **Dissolve** (union): Dissolve overlapping features within a single source by specified attribute columns (e.g., dissolve multiple overlapping conservation land parcels by `CONSERVATION_LAND_TYPE`).
+
+Preprocessed FCs are saved with a `_pp` suffix (e.g., `src_05_ngo_lands_pp`).
+
+Also creates the **`bc_boundary`** feature class by merging:
+- `bc_boundary_land` (provincial terrestrial boundary)
+- Marine areas from `bc_abms` (BC Boundary ABMS) and `marine_ecosections`
+
+The merged boundary is dissolved into a single polygon representing BC's full land and marine extent.
+
+### Step 4 — Process Vector
+
+**4a. `designations_overlapping`**
+
+Creates an empty feature class with fields: `process_order`, `designation`, `source_id`, `source_name`, `forest_restriction`, `og_restriction`, `mine_restriction`. Then iterates each source in `process_order`:
+
+1. Selects the preprocessed FC (if available) or the raw source FC.
+2. **Clips** it to `bc_boundary` (land boundary) using `arcpy.analysis.Clip`.
+3. Opens a `SearchCursor` on the clipped result and an `InsertCursor` on the output.
+4. For each feature, inserts a row with the designation attributes and restriction levels looked up from the CSV configuration.
+
+The result is a single FC where all designation polygons are stacked — overlaps between different designations are preserved.
+
+**4b. `designations_planarized`**
+
+Takes `designations_overlapping` and produces a non-overlapping output:
+
+1. **Union** (`arcpy.analysis.Union`): Splits all polygons at every intersection boundary, creating planar topology. Every resulting polygon fragment knows which original designations it belonged to.
+2. For each fragment, retains only the designation with the **lowest `process_order`** (highest priority).
+3. **Dissolve** (`arcpy.management.Dissolve`): Merges adjacent fragments with the same designation, computing `MAX` statistics on the restriction fields.
+4. Populates the output using `InsertCursor`, looking up designation names and restriction values from a process_order dictionary.
+
+The result: every point in BC falls within at most one designation polygon, assigned to the highest-priority overlapping designation.
+
+### Step 5 — Process Raster (Optional)
+
+Requires the **Spatial Analyst** extension (not available with ArcGIS Pro Basic). Disabled by default (`--raster` to enable).
+
+- **Rasterize**: Converts each designation source to a GeoTIFF at the configured resolution (default 100m) using `arcpy.conversion.PolygonToRaster`.
+- **Overlay**: Uses NumPy array operations to combine all rasters into four outputs:
+  - `designatedlands.tif` — designation codes (highest process_order wins)
+  - `forest_restriction.tif` — forest restriction levels
+  - `og_restriction.tif` — oil & gas restriction levels
+  - `mine_restriction.tif` — mine restriction levels
+
+### Step 6 — Dump
+
+Exports `designations_overlapping` and `designations_planarized` from the working GDB into a clean output File Geodatabase at `outputs/designatedlands_output.gdb`. Creates the output GDB if it doesn't exist; overwrites existing FCs if they do.
+
+### Step 7 — Cleanup
+
+Deletes all intermediate feature classes (`src_*` and `*_pp`) from the working GDB to reclaim disk space. The output GDB in `outputs/` is not affected. Use `--skip-cleanup` to keep intermediate data for debugging.
+
+
+---
 
 ## Requirements
 
-- Python >=3.7
-- GDAL (with `ogr2ogr` available at the command line) (tested with GDAL 3.0.2)
-- a PostGIS enabled PostgreSQL database (tested with PostgreSQL 13, scripts require PostGIS >=3.1/Geos >=3.9)
-- for the raster processing, a relatively large amount of RAM (tested with 64GB at 10m resolution, 16GB at 25m resolution)
-
-## Optional
-
-- `conda` for managing Python requirements
-- Docker for easy installation of PostgreSQL/PostGIS
+- **ArcGIS Pro** (tested with ArcGIS Pro 3.x)
+- **ArcGIS Pro Basic** license (minimum) — Spatial Analyst extension needed only for raster processing
+- **Python 3.9+** (via `arcgispro-py3` conda environment)
+- **arcpy** (included with ArcGIS Pro)
+- **openpyxl** 3.1.2+ (for xlsx report generation)
+- Network access to `openmaps.gov.bc.ca` (BCGW WFS)
 
 
-## Installation (with conda and Docker)
+## Installation
 
-This pattern should work on most OS.
+1. Clone the repository:
+    ```
+    git clone https://github.com/cjsostad/designatedlands---AG.git
+    cd "designatedlands - AG"
+    ```
 
-1. Install Anaconda or [miniconda](https://docs.conda.io/en/latest/miniconda.html)
+2. Activate the ArcGIS Pro Python environment:
+    ```
+    conda activate arcgispro-py3
+    ```
 
-2. Open a [conda command prompt](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html)
+3. Install openpyxl (if not already available):
+    ```
+    pip install openpyxl
+    ```
 
-3. Clone the repository and navigate to the project folder:
-
-        $ git clone https://github.com/bcgov/designatedlands.git
-        $ cd designatedlands
-
-4. Create and activate a conda enviornment for the project using the supplied `environment.yml`:
-
-        $ conda env create -f environment.yml
-        $ conda activate designatedlands
-
-5. Download and install Docker using the appropriate link for your OS:
-    - [MacOS](https://download.docker.com/mac/stable/Docker.dmg)
-    - [Windows](https://download.docker.com/win/stable/Docker%20Desktop%20Installer.exe)
-
-6. Get a postgres docker image with PostGIS >=3.1 and GEOS >=3.9:
-
-        $ docker pull postgis/postgis:14-3.2
-
-7. Run the container, create the database, add required extensions (*note*: you will have to change the line continuation characters from `\` to `^` if running the job in Windows):
-
-        $ docker run --name dlpg \
-          -e POSTGRES_PASSWORD=postgres \
-          -e POSTGRES_USER=postgres \
-          -e PG_DATABASE=designatedlands \
-          -p 5433:5432 \
-          -d postgis/postgis:14-3.2
-        $ psql -c "CREATE DATABASE designatedlands" postgres
-        $ psql -c "CREATE EXTENSION postgis"
-        $ psql -c "CREATE EXTENSION intarray"
-
-
-    Running the container like this:
-
-    - allows you to connect to it on port 5433 from localhost or 127.0.0.1
-    - names the container dlpg
-
-    Note that `designatedlands.py` uses the above database credentials as the default. If you need to change these (for example, changing the port
-    to avoid conflicting with a system installation), modify the `db_url` parameter in the config file you supply to designatedlands (see below).
-
-    As long as you don't remove this container, it will retain all the data you put in it. If you have shut down Docker or the container, you can start it up again with this command:
-
-          $ docker start dlpg
+4. If any data sources are marked `manual_download = T` in the source CSV, download those datasets to the `source_data/` folder.
 
 
 ## Usage
 
-First, modify the `sources_designations.csv`and `sources_supporting.csv` files as required. These files define all designation data sources to be processed and how the script will process each source. See [below](#sources-csv-files) for a full description of these files and how they defines the various data sources.
+### Full pipeline (recommended)
 
-If any data sources are specified as **manual downloads** in the source csv files, download the data to the `source_data` folder (or optionally to the folder identified by the `source_data` key in the config file)
-
-Using the `designatedlands.py` command line tool, load and process all data then dump the results to .tif/geopackage:
+Run the entire pipeline with default settings (no arguments required):
 
 ```
-$ python designatedlands.py download
-$ python designatedlands.py preprocess
-$ python designatedlands.py process-vector
-$ python designatedlands.py process-raster
-$ python designatedlands.py dump
+python main.py
 ```
 
-See the `--help` for more options:
-```
-$ python designatedlands.py --help
-Usage: designatedlands.py [OPTIONS] COMMAND [ARGS]...
+This will:
+- Exclude federal layers (National Parks, NWA, MBS)
+- Skip raster processing
+- Download all layers, preprocess, build vector outputs, export, and clean up
 
-Options:
-  --help  Show this message and exit.
+### Common options
 
-Commands:
-  cleanup          Remove temporary tables
-  download         Download data, load to postgres
-  dump             Dump output tables to file
-  overlay          Intersect layer with designatedlands and write to GPKG
-  preprocess       Create tiles layer and preprocess sources where required
-  process-raster   Create raster designation/restriction layers
-  process-vector   Create vector designation/restriction layers
-  test-connection  Confirm that connection to postgres is successful
-```
+```bash
+# Include federal layers
+python main.py --no-exclude-federal
 
-For help regarding an individual command:
-```
-$ python designatedlands.py download --help
-Usage: designatedlands.py download [OPTIONS] [CONFIG_FILE]
+# Enable raster processing (requires Spatial Analyst)
+python main.py --raster
 
-  Download data, load to postgres
+# Use a specific config file
+python main.py --config config_2020-10-08.cfg
 
-Options:
-  -a, --alias TEXT  The 'alias' key for the source of interest
-  --overwrite       Overwrite any existing output, force fresh download
-  -v, --verbose     Increase verbosity.
-  -q, --quiet       Decrease verbosity.
-  --help            Show this message and exit.
+# Filter to recently changed designations only
+python main.py --recent-only --start-date 2025-04-01
+
+# Keep intermediate data for inspection
+python main.py --skip-cleanup
+
+# Skip downloads (use what's already in the GDB)
+python main.py --skip-download
+
+# Verbose logging
+python main.py --verbose
 ```
 
-## sources csv files
+### All command-line flags
 
-The files `sources_designations.csv` and `sources_supporting.csv` define all source layers and how they are processed. Edit these tables to customize the analysis.  Columns are noted below. All columns are present in `sources_designations.csv`, but `designation`/`process_order`/`restriction` columns are not included in `sources_supporting.csv` - but the remaining column definitions are identical. Note that order of rows in these files is not important, order your designations by populating the **process_order** column with integer values. Do not include a `process_order` integer for designations that are to be excluded (`exclude = T`)
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--config`, `-c` | None | Path to `.cfg` configuration file |
+| `--verbose`, `-v` | off | Increase log verbosity |
+| `--quiet`, `-q` | off | Suppress log output |
+| `--skip-download` | off | Skip the download step |
+| `--raster` / `--no-raster` | off | Enable/disable raster processing |
+| `--skip-cleanup` | off | Keep intermediate FCs in working GDB |
+| `--recent-only` | off | Filter sources to date window |
+| `--start-date` | 2025-04-01 | Start of date filter window |
+| `--end-date` | today | End of date filter window |
+| `--exclude-federal` / `--no-exclude-federal` | on | Exclude/include federal designations |
 
-| COLUMN                 | DESCRIPTION                                                                                                                                                                            |
-|------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **process_order**              | An integer defining the order in which to overlay layers.  |
-| **exclude**              | A value of `T` will exclude the source from all operations |
-| **manual_download**        | A value of `T` indicates that a direct download url is not available for the data. Download these sources manually to the downloads folder and ensure that value given for **file_in_url** matches the name of the file in the download folder                                                            |
-| **name**                   | Full name of the designated land category                                                                                                                                                |
-| **designation**                  | A unique underscore separated value used for coding the various designated categories (eg `park_provincial`)                                                                                                |
-| **source_id_col**     | The column in the source data that defines the unique ID for each feature                                                                                                              |
-| **source_name_col**   | The column in the source data that defines the name for each feature                                                                                                                   |
-| **forest_restriction** | Level of restriction for the designation, forestry related activities (`Full`, `High`, `Medium`, `Low`, `None`)     |
-| **og_restriction** | Level of restriction for the designation, oil and gas related activities (`Full`, `High`, `Medium`, `Low`, `None`)    |
-| **mine_restriction** | Level of restriction for the designation, mine related activities (`Full`, `High`, `Medium`, `Low`, `None`)     |
-| **url**                    | Download url for the data source                                                                                                                                                       |
-| **file_in_url**            | Name of the file of interest in the download from specified url. Not required for BCGW downloads.                                                                                            |
-| **layer_in_file**          | For downloads of multi-layer files. Not required for BCGW downloads     |
-| **query**                  | A query defining the subset of data of interest from the given file/layer (CQL for BCGW sources, SQLITE dialect for other sources). If it is a BCGW source (ie. url starts with https://catalogue.gov.bc.ca/) and you want to include the current date in the query (eg., current query for 'Designated Areas'), put a `'{currdate}'` placeholder in the query (e.g., `RETIREMENT_DATE > '{currdate}'`).  The placeholder will be replaced by the current date when the script runs.                                                                                          |
-| **metadata_url**           | URL for metadata reference                                                                                                                                                             |
-| **info_url**               | Background/info url in addtion to metadata (if available)   |
-| **preprocess_operation**   | Pre-processing operation to apply to layer (`clip` and `union` are the only supported operations)  |
-| **preprocess_args** | Argument(s) to passs to **preprocess_operation** . `clip` requires a layer to clip by and `union` requires column(s) to aggregate by. For example, to clip a source by the Muskwa-Kechika Management Area boundary, set **preprocess_operation** = `clip` and **preprocess_args** = `mk_boundary` |
-| **notes**                  | Misc notes related to layer                                                                                                                                                            |
-| **license**                | The license under which the data is distrubted.
+### Subcommand interface
+
+`designatedlands.py` also exposes individual pipeline steps as subcommands for advanced use:
+
+```bash
+python designatedlands.py download [CONFIG_FILE]
+python designatedlands.py preprocess [CONFIG_FILE]
+python designatedlands.py process-vector [CONFIG_FILE]
+python designatedlands.py process-raster [CONFIG_FILE]
+python designatedlands.py dump [CONFIG_FILE]
+python designatedlands.py cleanup [CONFIG_FILE]
+python designatedlands.py overlay IN_FILE OUT_FILE [CONFIG_FILE]
+```
+
+### Smart resume
+
+`resume_pipeline.py` automatically detects which pipeline steps have already completed (by inspecting the GDB contents) and resumes from where the last run stopped:
+
+```
+python resume_pipeline.py
+```
 
 
-### Supported formats / data validation
-
-Non-BCGW data loads from url will generally work for any vector format that is supported by GDAL. Note however:
-
-- shapefile urls must be zip archives that include all required shapefile sidecar files (dbf, prj, etc)
-- `designatedlands` presumes that input data are valid and of types `POLYGON` or `MULTIPOLYGON`
+---
 
 ## Configuration
 
-If required, you can modify the general configuration of designatedlands when running the commands above by supplying the path to a config file as a command line argument.
-Note that the config file does not have to contain all parameters, you only need to include those where you do not wish to use the default values.
+An INI-format `.cfg` file can be supplied via `--config`. Only include parameters you want to override — defaults are used for the rest.
 
-An example configuration file is included [`designateldands_sample_config.cfg`](designatedlands_sample_config.cfg), listing all available configuration parameters, setting the raster resolution to 25m, and using only 4 cores.
+See [`designatedlands_sample_config.cfg`](designatedlands_sample_config.cfg) for all available settings:
 
-When using a configuration file, remember to specify it each time you use `designatedlands.py`, for example:
-
-    $ python designatedlands.py download designatedlands_sample_config.cfg
-    $ python designatedlands.py preprocess designatedlands_sample_config.cfg
-    $ python designatedlands.py process-vector designatedlands_sample_config.cfg
-    $ python designatedlands.py process-raster designatedlands_sample_config.cfg
-    $ python designatedlands.py dump designatedlands_sample_config.cfg
-
-| KEY       | VALUE                                            |
-|-----------|--------------------------------------------------|
-| `source_data`| path to folder that holds downloaded datasets |
-| `sources_designations`| path to csv file holding designation data source definitions |
-| `sources_supporting`| path to csv file holding supporting data source definitions |
-| `out_path`| path to write output .gpkg and tiffs |
-| `db_url`| [SQLAlchemy connection URL](http://docs.sqlalchemy.org/en/latest/core/engines.html#postgresql) pointing to the postgres database. The port specified in the url must match the port your database is running on - default is 5433.
-| `resolution`| resolution of output geotiff rasters (m) |
-| `n_processes`| Input layers are broken up by tile and processed in parallel, define how many parallel processes to use. (default of -1 indicates number of cores on your machine minus one)|
+| Key | Default | Description |
+|-----|---------|-------------|
+| `dl_path` | `source_data` | Folder for downloaded source data |
+| `sources_designations` | `sources_designations.csv` | Designation source definitions |
+| `sources_supporting` | `sources_supporting.csv` | Supporting layer definitions |
+| `out_path` | `outputs` | Output folder for final GDB and reports |
+| `gdb_path` | `designatedlands.gdb` | Working File Geodatabase |
+| `resolution` | `100` | Raster output resolution in metres |
+| `n_processes` | `multiprocessing.cpu_count() - 1` | Parallel processes for raster overlay |
 
 
+## Source CSV Files
+
+### `sources_designations.csv`
+
+Defines all 42 designation layers. Each row configures one data source. Key columns:
+
+| Column | Description |
+|--------|-------------|
+| **process_order** | Integer defining overlay priority. Lower number = higher priority. |
+| **exclude** | `T` to exclude the source from all operations. |
+| **manual_download** | `T` if the source must be downloaded manually to `source_data/`. |
+| **name** | Full name of the designation (e.g., "National Parks (Administered Lands)"). |
+| **jurisdiction** | `federal` for federal sources; blank for provincial. Used by `--exclude-federal`. |
+| **designation** | Machine-readable underscore-separated code (e.g., `park_national`). |
+| **source_id_col** | Column in the source data providing the unique feature ID. |
+| **source_name_col** | Column providing the feature name. |
+| **forest_restriction** | Restriction level for forestry: `Protected`, `Full`, `High`, `Medium`, `Low`, `None`. |
+| **og_restriction** | Restriction level for oil & gas. |
+| **mine_restriction** | Restriction level for mining. |
+| **url** | BC Data Catalogue URL or direct download URL. |
+| **bcgw_layer_name** | BCGW WFS layer name (if different from catalogue-resolved name). |
+| **query** | CQL filter for WFS requests (e.g., `PARK_CLASS <> 'REC'`). |
+| **date_filter_query** | CQL query with `{start_date}` / `{end_date}` placeholders for `--recent-only`. |
+| **preprocess_operation** | `clip` or `union` (dissolve). |
+| **preprocess_args** | Arguments for preprocessing (clip boundary FC or dissolve columns). |
+
+### `sources_supporting.csv`
+
+Defines 6 supporting layers used during processing (not designation layers themselves):
+
+- **BCGS 1:20k Grid** (`tiles_20k`) — tile index for parallel processing
+- **NTS 250k Grid** (`tiles_250k`) — national topographic tile index
+- **BC Boundary ABMS** (`bc_abms`) — administrative boundary (marine)
+- **BC Boundary Land** (`bc_boundary_land`) — terrestrial boundary
+- **Marine Ecosections** (`marine_ecosections`) — marine ecological zones
+- **Muskwa-Kechika Boundary** (`mk_boundary`) — management area for clipping
 
 
-## Vector outputs
+---
 
-The `designatedlands.py dump` command writes two layers to output geopackage `outputs/designatedlands.gpkg`:
+## Code Breakdown
 
-##### 1. `designations_overlapping`
-
-Each individual designation polygon is clipped to the terrestrial boundary of BC, repaired if necessary, then loaded to this layer otherwise unaltered.
-Where designations overlap, output polygons will overlap. Overlaps occur primarily between different designations, but are also present within the same designation. See the following table for the structure of this layer:
-
-<!--
-Run the following to get the markdown table below on your clipboard, then paste it here. 
-Requires csvtomd tool (https://github.com/mplewis/csvtomd; `brew install csvtomd` or `pip install csvtomd`), and 
-the designatedlands db to be running on 5433 (`docker start dlpg`):
-
-psql -p 5433 designatedlands -c \
- '\copy (SELECT * FROM designations_overlapping LIMIT 1) TO STDOUT CSV HEADER' | \
-  rev | cut -d, -f 2- | rev | csvtomd | pbcopy 
--->
-
-designations_overlapping_id  |  process_order  |  designation                       |  source_id  |  source_name        |  forest_restriction  |  og_restriction  |  mine_restriction  |  map_tile
------------------------------|-----------------|------------------------------------|-------------|---------------------|----------------------|------------------|--------------------|----------
-1                            |  1              |  private_conservation_lands_admin  |  10001      |  Arrow Lakes (ACQ)  |  3                   |  1               |  1                 |  082K011
-
-
-##### 2. `designations_planarized`
-
-Above `designations_overlapping` is further processed to remove overlaps and create a planarized output.
-Where overlaps occur, they are noted in the attributes as semi-colon separated values. For example, a polygon where a `uwr_no_harvest` designation overlaps with a `land_act_reserves_17` designation will have values like this:
-
-| designation | source_id | source_name | forest_restrictions | mine_restrictions | og_restrictions |
-|-------------|-----------|-------------|-------------|-----------|-------------|
-|`uwr_no_harvest;land_act_reserves_17`|`137810341;964007`|`u-3-005;SEC 17 DESIGNATED USE AREA`|`4;0` | `2;1` | `0;0`
-
-The output restriction columns (`forest_restriction_max`,`mine_restriction_max`,`og_restriction_max`) are assigned the value of the highest restriction present within the polygon for the given restriction type.
-
-### QA tables
-
-Area totals for this layer are checked. To review the checks, see the tables in the postgres db:
-
-- `qa_compare_outputs` - reports on total area of each designation and the difference between `designations_overlapping` and `designations_planarized`. Any differences should be due to same source overlaps.
-- `qa_summary` - check that the total area of `designations_overlaps` matches total area of BC and check restriction areas.
-- `qa_total_check` - check that the total for each restriction class adds up to the total area of BC
-
-To connect to the database, you must do so via the host and port configured (localhost & 5433 by default), using the correct parameters (db name and credentials as described above). You can connect through any frontend database application (e.g., pgAdmin, dBeaver), GIS (e.g., QGIS), or the command line tool `psql`:
-
-`$ psql -p 5433 designatedlands`
-
-If you are connecting via the `psql` command line tool, once you have connected you would run a SQL query such as:
-
-```sql
-SELECT * FROM qa_compare_outputs ORDER BY pct_diff;
-```
-
-If you want to save the qa outputs to a file you can run something like this:
-
-```sql
-\copy (SELECT * FROM qa_compare_outputs ORDER BY pct_diff) TO outputs/qa_compare_outputs.csv CSV HEADER;
-\copy (SELECT * FROM qa_summary) TO outputs/qa_summary.csv CSV HEADER;
-\copy (SELECT * FROM qa_total_check) TO outputs/qa_total_check.csv CSV HEADER;
-```
-
-## Raster outputs
-
-Four output rasters are created:
-
-1. `designatedlands.tif` - output designations. In cases of overlap, the designation with the highest `process_order` is retained
-2. `forest_restriction.tif` - output forest restriction levels
-3. `mine_restriction.tif` - output mine restriction levels
-4. `og_restriction.tif` - output oil and gas restriction levels
-
-Raster attribute tables are available for each tif.
-
-
-## Overlay
-
-In addition to creating the output designated lands layer, this tool also provides a mechanism to overlay the results with administration or ecological units of your choice:
+### Project structure
 
 ```
-$ python designatedlands.py overlay --help
-Usage: designatedlands.py overlay [OPTIONS] IN_FILE OUT_FILE [CONFIG_FILE]
-
-  Intersect layer with designatedlands and write to GPKG
-
-Options:
-  -l, --in_layer TEXT     Name of input layer
-  -nln, --out_layer TEXT  Name of output layer
-  -v, --verbose           Increase verbosity.
-  -q, --quiet             Decrease verbosity.
-  --help                  Show this message and exit.
+├── main.py                          # Full pipeline runner (recommended entry point)
+├── designatedlands.py               # Core DesignatedLands class and geoprocessing logic
+├── date_filter.py                   # Date-based filtering and xlsx report generation
+├── resume_pipeline.py               # Smart resume with auto-detection of completed steps
+├── sources_designations.csv         # 42 designation source definitions
+├── sources_supporting.csv           # 6 supporting layer definitions
+├── designatedlands_sample_config.cfg  # Example configuration file
+├── designatedlands.gdb/             # Working File Geodatabase (intermediate data)
+├── source_data/                     # Downloaded / manual source data files
+├── outputs/                         # Output GDB and reports
+│   ├── designatedlands_output.gdb/  # Final clean output geodatabase
+│   └── designated_lands_pipeline_report.xlsx  # Pipeline report
+├── logs/                            # Timestamped run logs
+├── rasters/                         # Raster outputs (when --raster is used)
+└── scripts/                         # Utility scripts
 ```
 
-For example, to overlay `designatedlands` with BC ecosections, first get `ERC_ECOSECTIONS_SP.gdb` from [here](https://catalogue.data.gov.bc.ca/dataset/ecosections-ecoregion-ecosystem-classification-of-british-columbia), then run the following command to create output `dl_eco.gpkg/eco_overlay`:
+### `main.py` — Pipeline Orchestrator
 
-```
-$ python designatedlands.py overlay \
-    ERC_ECOSECTIONS_SP.gdb \
-    dl_eco.gpkg \
-    --in_layer WHSE_TERRESTRIAL_ECOLOGY_ERC_ECOSECTIONS_SP \
-    --out_layer eco_overlay
-```
+The recommended entry point. Parses command-line arguments, initialises the `DesignatedLands` object, and runs each pipeline step in sequence with error handling and progress output.
 
-## Aggregate output layers with Mapshaper
+Key responsibilities:
+- Prints a configuration banner showing active flags
+- Calls `DesignatedLands()` constructor (loads CSVs, applies filters, sets up GDB)
+- Wraps each step in `run_step()` which captures arcpy messages and logs failures
+- Generates an xlsx report when federal exclusion or date filtering is active
+- Controls optional steps (raster, cleanup) via CLI flags
 
-As a part of data load, designatedlands dices all inputs into BCGS 1:20,000 map tiles. This speeds up processing significantly by enabling efficient parallel processing and limiting the size/complexity of input geometries. However, very small gaps are created between the tiles and re-aggregating (dissolving) output layers across tiles in PostGIS is error prone. While the gaps do not have any effect on the designated lands stats, they do need to be removed for display. Rather than attempt this in PostGIS, we can aggregate outputs using the topologically enabled [`mapshaper`](https://github.com/mbloch/mapshaper/) tool:
+### `designatedlands.py` — Core Processing Engine
 
-If not already installed, install node (<https://nodejs.org/en/>) and then
-install mapshaper with:
+Contains the `DesignatedLands` class with all geoprocessing methods:
 
-```
-npm install -g mapshaper
-```
+| Method | Purpose |
+|--------|---------|
+| `__init__()` | Load config, read CSVs, filter sources, set up GDB and arcpy environment |
+| `_read_sources()` | Parse CSV, validate process_order, apply federal exclusion & date filtering |
+| `_validate_sources()` | Check that process_order starts at 1 and has no gaps or duplicates |
+| `download()` | Fetch all sources from WFS or local files into the working GDB |
+| `preprocess()` | Apply per-source clip/dissolve operations |
+| `create_bc_boundary()` | Merge land + marine boundaries into single `bc_boundary` FC |
+| `create_designations_overlapping()` | Clip each source to BC and stack into overlapping output |
+| `create_designations_planarized()` | Union → priority assignment → Dissolve into non-overlapping output |
+| `rasterize()` | Convert vector designations to per-source GeoTIFFs |
+| `overlay_rasters()` | Combine rasters using NumPy (highest priority wins) |
+| `dump()` | Export final FCs to `outputs/designatedlands_output.gdb` |
+| `overlay()` | Intersect an external layer with `designations_overlapping` |
+| `cleanup()` | Remove intermediate `src_*` and `*_pp` FCs from working GDB |
+| `test_connection()` | Verify GDB accessibility |
 
-```
-# mapshaper doesn't read .gpkg, convert output to shp and use mapshaper
-# to snap and dissolve tiles
-# requires mapshaper v0.4.72 to dissolve on >1 attribute
-# use mapshaper-xl to allocate enough memory
-ogr2ogr \
-  designatedlands_tmp.shp \
-  -sql "SELECT
-         designatedlands_id as dl_id,
-         designation as designat,
-         bc_boundary as bc_bound,
-         category,
-         geom
-        FROM designatedlands" \
-  designatedlands.gpkg \
-  -lco ENCODING=UTF-8 &&
-mapshaper-xl \
-  designatedlands_tmp.shp snap \
-  -dissolve designat,bc_bound \
-    copy-fields=category \
-  -explode \
-  -o designatedlands_clean.shp &&
-ls | grep -E "designatedlands_tmp\.(shp|shx|prj|dbf|cpg)" | xargs rm
-```
+The module also provides:
+- **Automatic arcpy message logging**: All arcpy tool calls are wrapped to log geoprocessing messages at the appropriate level.
+- **WFS download infrastructure**: Functions to resolve catalogue URLs, fetch GeoJSON via WFS, strip Z-coordinates, and load results into a GDB.
+- **Raster attribute table creation**: `create_rat()` function for building `.tif.vat.dbf` files.
 
-Do the same for the overlaps file
-```
-ogr2ogr \
-  designatedlands_overlaps_tmp.shp \
-  -sql "SELECT
-         designatedlands_overlaps_id as dl_ol_id,
-         designation as designat,
-         designation_id as des_id,
-         designation_name as des_name,
-         bc_boundary as bc_bound,
-         category,
-         geom
-        FROM designatedlands_overlaps" \
-  designatedlands.gpkg \
-  -lco ENCODING=UTF-8 &&
-mapshaper-xl \
-  designatedlands_overlaps_tmp.shp snap \
-  -dissolve designat,des_id,des_name,bc_bound \
-    copy-fields=category \
-  -explode \
-  -o designatedlands_overlaps_clean.shp &&
-ls | grep -E "designatedlands_overlaps_tmp\.(shp|shx|prj|dbf|cpg)" | xargs rm
-```
+### `date_filter.py` — Reporting & Date Filtering
 
-## Results
+Provides date-based WFS queries and xlsx report generation using **openpyxl**:
 
-The results of previous runs of the tool can be found on the [releases](https://github.com/bcgov/designatedlands/releases) page
-of this repository. The [`make_resources.sh`](scripts/make_resources.sh) script is used to generate the data hosted in the release.
+- `apply_date_filter_to_query()` — Injects `{start_date}` and `{end_date}` into CQL query templates.
+- `run_report()` — Queries WFS for recently changed features and generates a 4-sheet Excel workbook:
+  - **Changes**: Features added/modified within the date window
+  - **Excluded Layers**: Layers removed by date or federal filter
+  - **Summary**: Feature counts per designation
+  - **Pipeline Options**: Flags used for the current run
+- `write_report_xlsx()` — Low-level workbook creation with formatted headers and auto-sized columns.
+
+### `resume_pipeline.py` — Smart Resume
+
+`detect_completed_steps()` inspects the working GDB to determine which pipeline steps have already been completed:
+
+- Checks for `src_*` feature classes matching the expected source list
+- Checks for `bc_boundary` existence
+- Checks for `designations_overlapping` and `designations_planarized`
+- Checks for FCs inside `outputs/designatedlands_output.gdb`
+- Checks whether intermediate FCs have been cleaned up
+
+Resumes from the first incomplete step, or can be overridden with `--force-from STEP`.
+
+
+---
+
+## Vector Outputs
+
+The `dump` step writes two feature classes to `outputs/designatedlands_output.gdb`:
+
+### `designations_overlapping`
+
+Each individual designation polygon, clipped to land boundary, with full attribution. Overlaps are preserved.
+
+| Field | Description |
+|-------|-------------|
+| `process_order` | Priority rank from CSV |
+| `designation` | Machine-readable designation code |
+| `source_id` | Original feature ID from source data |
+| `source_name` | Original feature name from source data |
+| `forest_restriction` | Forestry restriction level (0–5) |
+| `og_restriction` | Oil & gas restriction level (0–5) |
+| `mine_restriction` | Mining restriction level (0–5) |
+
+### `designations_planarized`
+
+Non-overlapping output. Where designations overlap, the polygon is assigned to the highest-priority designation. Restriction fields hold the maximum value across all overlapping designations. All contributing designation names are listed in `overlapping_designations`.
+
+| Field | Description |
+|-------|-------------|
+| `designation` | Highest-priority designation code (lowest `process_order`) |
+| `overlapping_designations` | Semicolon-delimited list of all designation codes that overlap this polygon (e.g., `vqo_retain; fsw`), sorted by priority |
+| `forest_restriction_max` | Maximum forest restriction across overlapping designations |
+| `og_restriction_max` | Maximum oil & gas restriction |
+| `mine_restriction_max` | Maximum mine restriction |
+
+
+## Raster Outputs (Optional)
+
+When `--raster` is enabled, four GeoTIFFs are produced in `outputs/`:
+
+1. `designatedlands.tif` — Designation codes (highest process_order wins in overlaps)
+2. `forest_restriction.tif` — Forest restriction levels
+3. `og_restriction.tif` — Oil & gas restriction levels
+4. `mine_restriction.tif` — Mine restriction levels
+
+Each raster includes an attribute table (`.tif.vat.dbf`).
+
+
+---
 
 ## License
 
@@ -371,7 +568,3 @@ of this repository. The [`make_resources.sh`](scripts/make_resources.sh) script 
     limitations under the License.
 
 This repository is maintained by [Environmental Reporting BC](http://www2.gov.bc.ca/gov/content?id=FF80E0B985F245CEA62808414D78C41B). Click [here](https://github.com/bcgov/EnvReportBC-RepoList) for a complete list of our repositories on GitHub.
-
-## Credits
-
-[Straightforward overlay queries](https://blog.cleverelephant.ca/2019/07/postgis-overlays.html) now practical with complex data thanks to PostGIS 3.1/GEOS 3.9.
