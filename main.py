@@ -1,5 +1,5 @@
 """
-Run the full designatedlands pipeline in sequence.
+Run the full designatedlands pipeline in sequence....
 
 This script orchestrates the complete Designated Lands analysis for
 British Columbia, combining 40+ spatial designation layers (parks,
