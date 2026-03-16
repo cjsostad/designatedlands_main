@@ -192,6 +192,51 @@ def main():
         print("[Step 2/7] Download SKIPPED (--skip-download).\n")
 
     # ---------------------------------
+    # REPORT - Generate xlsx pipeline report
+    # ---------------------------------
+    # Produces an Excel workbook (outputs/designated_lands_pipeline_report.xlsx)
+    # with sheets:
+    #   - Changes: WFS features added/modified in the date window
+    #   - Excluded Layers: layers removed by date or federal filter
+    #   - Summary: counts per designation
+    #   - Pipeline Options: the flags used for this run + query filters
+    #   - Designation Categories: each designation mapped to a category
+
+    print("[Report] Generating pipeline report (xlsx)...")
+    from date_filter import run_report
+
+    xlsx_path = os.path.join(
+        script_dir, "outputs", "designated_lands_pipeline_report.xlsx",
+    )
+
+    # Collect query filters from sources for the report
+    source_queries = []
+    for src in DL.sources:
+        source_queries.append({
+            "designation": src.get("designation", ""),
+            "name": src.get("name", ""),
+            "query": src.get("query", ""),
+        })
+
+    pipeline_options = {
+        "recent_only": DL.recent_only,
+        "exclude_federal": DL.exclude_federal,
+        "start_date": DL.start_date,
+        "end_date": DL.end_date,
+        "source_queries": source_queries,
+    }
+
+    run_report(
+        DL.start_date, DL.end_date,
+        xlsx_path=xlsx_path, avoid_overwrite=True,
+        exclude_federal=DL.exclude_federal,
+        federal_excluded=DL.federal_excluded_sources,
+        pipeline_options=pipeline_options,
+    )
+
+    print(f"[Report] Saved to {xlsx_path}\n")
+
+    # ---------------------------------
     # STEP 3
     # ---------------------------------
 

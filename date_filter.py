@@ -333,7 +333,7 @@ def _unique_xlsx_path(base_path):
 
 def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
                       avoid_overwrite=False, federal_excluded=None,
-                      pipeline_options=None):
+                      pipeline_options=None, source_queries=None):
     """
     Write the pipeline report to an Excel workbook.
 
@@ -355,6 +355,9 @@ def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
         Each dict has keys: name, designation. Federal layers removed.
     pipeline_options : dict or None
         Keys describing the pipeline settings chosen by the user.
+    source_queries : list[dict] or None
+        Each dict has keys: designation, name, query.
+        Query filters applied to each designation layer.
 
     Returns
     -------
@@ -499,6 +502,27 @@ def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
             cell.alignment = header_align
         for fed in federal_excluded:
             ws4.append([fed["name"], fed["designation"]])
+
+    # Query filters per designation
+    if source_queries:
+        ws4.append([])
+        ws4.append(["Query Filters Applied to Designation Layers"])
+        ws4.cell(row=ws4.max_row, column=1).font = subtitle_font
+        ws4.append(["Designation", "Layer Name", "Query Filter"])
+        row_num = ws4.max_row
+        for col_idx in (1, 2, 3):
+            cell = ws4.cell(row=row_num, column=col_idx)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_align
+        for sq in source_queries:
+            query_text = sq.get("query", "") or "(no query filter)"
+            ws4.append([
+                sq.get("designation", ""),
+                sq.get("name", ""),
+                query_text
+            ])
+        ws4.column_dimensions["C"].width = 80  # Wide column for queries
 
     # ==================== Designation Categories sheet ====================
     ws5 = wb.create_sheet("Designation Categories")
@@ -832,11 +856,13 @@ def run_report(start_date, end_date, test_wfs=False, xlsx_path=None,
             {"name": e["name"], "exclude_reason": e["exclude_reason"]}
             for e in excluded
         ]
+        source_queries = pipeline_options.get("source_queries") if pipeline_options else None
         written = write_report_xlsx(
             change_rows, excluded_info, summary, xlsx_path,
             avoid_overwrite=avoid_overwrite,
             federal_excluded=federal_excluded,
             pipeline_options=pipeline_options,
+            source_queries=source_queries,
         )
         print(f"  Report saved to: {written}\n")
         return written
