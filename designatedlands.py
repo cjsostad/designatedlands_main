@@ -1012,7 +1012,10 @@ class DesignatedLands:
 
         arcpy.analysis.Union([land_fc, marine_fc], union_tmp, "ALL")
         arcpy.management.Dissolve(union_tmp, bc_boundary_fc)
-        arcpy.management.Delete(union_tmp)
+        try:
+            arcpy.management.Delete(union_tmp)
+        except Exception:
+            LOG.warning("Could not delete temp FC %s", union_tmp)
 
         # Add bc_boundary and restriction columns
         arcpy.management.AddField(bc_boundary_fc, "bc_boundary", "TEXT", field_length=50)
@@ -1125,7 +1128,13 @@ class DesignatedLands:
                             fr, ogr, mr, geom
                         ])
 
-            arcpy.management.Delete(clipped_tmp)
+            try:
+                arcpy.management.Delete(clipped_tmp)
+            except Exception:
+                LOG.warning(
+                    "Could not delete temp FC %s — will be cleaned up on next iteration",
+                    clipped_tmp,
+                )
 
         # Build spatial index
         arcpy.management.AddSpatialIndex(out_fc)
@@ -1315,7 +1324,10 @@ class DesignatedLands:
                 ])
 
         # Clean up temporary data
-        arcpy.management.Delete(union_tmp)
+        try:
+            arcpy.management.Delete(union_tmp)
+        except Exception:
+            LOG.warning("Could not delete temp FC %s", union_tmp)
         arcpy.management.AddSpatialIndex(out_fc)
         LOG.info("designations_planarized created with %d features", len(groups))
 
@@ -1571,8 +1583,14 @@ class DesignatedLands:
         LOG.info("Overlay result written to %s\\%s", out_file, out_layer)
 
         # Clean up temp layers
-        arcpy.management.Delete(tmp_fc)
-        arcpy.management.Delete(overlay_tmp)
+        try:
+            arcpy.management.Delete(tmp_fc)
+        except Exception:
+            LOG.warning("Could not delete temp FC %s", tmp_fc)
+        try:
+            arcpy.management.Delete(overlay_tmp)
+        except Exception:
+            LOG.warning("Could not delete temp FC %s", overlay_tmp)
 
     # ------------------------------------------------------------------
     # Cleanup
