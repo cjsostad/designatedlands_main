@@ -49,6 +49,7 @@ import argparse
 import logging
 import os
 import sys
+from datetime import datetime
 import arcpy
 
 from designatedlands import DesignatedLands, log_arcpy_messages, set_log_level
@@ -282,13 +283,20 @@ def main():
         "critical_habitat_area"
     )
 
-    # Pipeline outputs
+    # Pipeline outputs (intermediate)
     planarized_fc = os.path.join(DL.gdb, "designations_planarized")
     overlapping_fc = os.path.join(DL.gdb, "designations_overlapping")
 
-    # Output feature classes
-    planarized_intersect = os.path.join(DL.gdb, "designations_planarized_cha")
-    overlapping_intersect = os.path.join(DL.gdb, "designations_overlapping_cha")
+    # Final output gdb
+    output_gdb = os.path.join(script_dir, "outputs", "designatedlands_output.gdb")
+    if not arcpy.Exists(output_gdb):
+        arcpy.management.CreateFileGDB(os.path.join(script_dir, "outputs"), "designatedlands_output.gdb")
+
+    # Date-stamped output feature classes
+    now = datetime.now()
+    date_suffix = now.strftime("%m_%d")
+    planarized_intersect = os.path.join(output_gdb, f"designations_planarized_cha_{date_suffix}")
+    overlapping_intersect = os.path.join(output_gdb, f"designations_overlapping_cha_{date_suffix}")
 
     # Use all CPU cores for faster processing
     arcpy.env.parallelProcessingFactor = "100%"
@@ -322,7 +330,7 @@ def main():
 
     print("[Step 4/7] Calculating CHA overlap percentages...")
 
-    planarized_cha = os.path.join(DL.gdb, "designations_planarized_cha")
+    planarized_cha = planarized_intersect
     planarized_fc = os.path.join(DL.gdb, "designations_planarized")
 
     # Field names in your layers
