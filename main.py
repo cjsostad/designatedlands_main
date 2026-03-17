@@ -217,6 +217,14 @@ def main():
             "name": src.get("name", ""),
             "query": src.get("query", ""),
         })
+    # Include supporting sources (e.g. Critical Habitat Area filter)
+    for src in DL.sources_supporting:
+        if src.get("query", "").strip():
+            source_queries.append({
+                "designation": src.get("designation", ""),
+                "name": src.get("name", ""),
+                "query": src.get("query", ""),
+            })
 
     pipeline_options = {
         "recent_only": DL.recent_only,
