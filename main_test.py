@@ -1,5 +1,5 @@
 """
-#Main.py with added test code to run the CHA AOI preparation as part of the pipeline.(Added as a module)
+Tested and working 03_16_26
 
 Run the full designatedlands pipeline in sequence.
 
@@ -51,6 +51,8 @@ import argparse
 import logging
 import os
 import sys
+from datetime import datetime
+import arcpy
 
 from designatedlands import DesignatedLands, log_arcpy_messages, set_log_level
 from Create_CHA_AOI import prepare_cha   # <-- import CHA script
@@ -265,6 +267,149 @@ def main():
 
     print("[Step 4/7] Vector processing complete.\n")
 
+    print("[Step 4/7] Running Critical Habitat Area intersections...")
+
+    # CHA dataset created by create_cha.py
+    cha_fc = os.path.join(
+        script_dir,
+        "source_data",
+        "critical_habitat_area.gdb",
+        "critical_habitat_area"
+    )
+
+    # Pipeline outputs (intermediate)
+    planarized_fc = os.path.join(DL.gdb, "designations_planarized")
+    overlapping_fc = os.path.join(DL.gdb, "designations_overlapping")
+
+    # Final output gdb
+    output_gdb = os.path.join(script_dir, "outputs", "designatedlands_output.gdb")
+    if not arcpy.Exists(output_gdb):
+        arcpy.management.CreateFileGDB(os.path.join(script_dir, "outputs"), "designatedlands_output.gdb")
+
+    # Date-stamped output feature classes
+    now = datetime.now()
+    date_suffix = now.strftime("%m_%d")
+    planarized_intersect = os.path.join(output_gdb, f"designations_planarized_cha_{date_suffix}")
+    overlapping_intersect = os.path.join(output_gdb, f"designations_overlapping_cha_{date_suffix}")
+
+    # Use all CPU cores for faster processing
+    arcpy.env.parallelProcessingFactor = "100%"
+
+    # -------------------------------------------------
+    # Intersect 1 — Planarized
+    # -------------------------------------------------
+    print("[Step 4/7] Intersecting designations_planarized with CHA...")
+
+    arcpy.analysis.PairwiseIntersect(
+        [planarized_fc, cha_fc],
+        planarized_intersect,
+        "ALL"
+    )
+
+    print("[Step 4/7] designations_planarized_cha created.")
+
+    # -------------------------------------------------
+    # Intersect 2 — Overlapping
+    # -------------------------------------------------
+    print("[Step 4/7] Intersecting designations_overlapping with CHA...")
+
+    arcpy.analysis.PairwiseIntersect(
+        [overlapping_fc, cha_fc],
+        overlapping_intersect,
+        "ALL"
+    )
+
+    print("[Step 4/7] designations_overlapping_cha created.")
+    print("[Step 4/7] CHA intersections complete.\n")
+
+    print("[Step 4/7] Calculating CHA overlap percentages...")
+
+    # --------------------------------------------------
+    # Use existing outputs from above
+    # --------------------------------------------------
+    overlapping_fc = os.path.join(DL.gdb, "designations_overlapping")
+    overlapping_intersect = overlapping_intersect   # already created above
+
+    # --------------------------------------------------
+    # 2. ADD AREA FIELDS
+    # --------------------------------------------------
+    if "CHA_Area_ha" not in [f.name for f in arcpy.ListFields(overlapping_intersect)]:
+        arcpy.management.AddField(overlapping_intersect, "CHA_Area_ha", "DOUBLE")
+
+    if "Total_Area_ha" not in [f.name for f in arcpy.ListFields(overlapping_fc)]:
+        arcpy.management.AddField(overlapping_fc, "Total_Area_ha", "DOUBLE")
+
+    # --------------------------------------------------
+    # 3. CALCULATE AREAS (HECTARES)
+    # --------------------------------------------------
+    arcpy.management.CalculateGeometryAttributes(
+        overlapping_intersect,
+        [["CHA_Area_ha", "AREA_GEODESIC"]],
+        area_unit="HECTARES"
+    )
+
+    arcpy.management.CalculateGeometryAttributes(
+        overlapping_fc,
+        [["Total_Area_ha", "AREA_GEODESIC"]],
+        area_unit="HECTARES"
+    )
+
+    # --------------------------------------------------
+    # 4. SUM CHA AREA
+    # (store in SAME output_gdb to stay consistent)
+    # --------------------------------------------------
+    summary_table = os.path.join(output_gdb, f"cha_overlap_summary_{date_suffix}")
+
+    if arcpy.Exists(summary_table):
+        arcpy.management.Delete(summary_table)
+
+    arcpy.analysis.Statistics(
+        overlapping_intersect,
+        summary_table,
+        [["CHA_Area_ha", "SUM"]],
+        ["designation"]   # 🔴 CHANGE if needed (e.g. "LAND")
+    )
+
+    # --------------------------------------------------
+    # 5. SUM TOTAL AREA
+    # --------------------------------------------------
+    total_area_table = os.path.join(output_gdb, f"designation_total_area_{date_suffix}")
+
+    if arcpy.Exists(total_area_table):
+        arcpy.management.Delete(total_area_table)
+
+    arcpy.analysis.Statistics(
+        overlapping_fc,
+        total_area_table,
+        [["Total_Area_ha", "SUM"]],
+        ["designation"]   # 🔴 MUST MATCH ABOVE
+    )
+
+    # --------------------------------------------------
+    # 6. JOIN TABLES
+    # --------------------------------------------------
+    arcpy.management.JoinField(
+        summary_table,
+        "designation",        # 🔴 CHANGE if needed
+        total_area_table,
+        "designation",        # 🔴 SAME FIELD
+        ["SUM_Total_Area_ha"]
+    )
+
+    # --------------------------------------------------
+    # 7. CALCULATE %
+    # --------------------------------------------------
+    if "CHA_Percent" not in [f.name for f in arcpy.ListFields(summary_table)]:
+        arcpy.management.AddField(summary_table, "CHA_Percent", "DOUBLE")
+
+    arcpy.management.CalculateField(
+        summary_table,
+        "CHA_Percent",
+        "(!SUM_CHA_Area_ha! / !SUM_Total_Area_ha!) * 100",
+        "PYTHON3"
+    )
+
+    print("[Step 4/7] CHA percentage calculation complete.")
     # ---------------------------------
     # STEP 5
     # ---------------------------------

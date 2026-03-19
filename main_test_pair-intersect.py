@@ -324,49 +324,92 @@ def main():
 
     print("[Step 4/7] Calculating CHA overlap percentages...")
 
-    planarized_cha = planarized_intersect
-    planarized_fc = os.path.join(DL.gdb, "designations_planarized")
+    # --------------------------------------------------
+    # Use existing outputs from above
+    # --------------------------------------------------
+    overlapping_fc = os.path.join(DL.gdb, "designations_overlapping")
+    overlapping_intersect = overlapping_intersect   # already created above
 
-    # Field names in your layers
-    orig_area_field_planarized = "Shape_Area"   # UPDATE if different in planarized_fc
-    orig_area_field_overlapping = "Shape_Area"  # UPDATE if different in overlapping_fc
-    intersect_area_field = "Shape_Area"         # UPDATE if different in intersect outputs
+    # --------------------------------------------------
+    # 2. ADD AREA FIELDS
+    # --------------------------------------------------
+    if "CHA_Area_ha" not in [f.name for f in arcpy.ListFields(overlapping_intersect)]:
+        arcpy.management.AddField(overlapping_intersect, "CHA_Area_ha", "DOUBLE")
 
-    # Function to calculate area in hectares
-    def area_ha(value_in_m2):
-        return value_in_m2 / 10000.0
-    
-    # -------------------------------------------------
-    # Make sure CHA_Percent field exists
-    # -------------------------------------------------
-    if "CHA_Percent" not in [f.name for f in arcpy.ListFields(planarized_intersect)]:
-        arcpy.management.AddField(planarized_intersect, "CHA_Percent", "DOUBLE")
+    if "Total_Area_ha" not in [f.name for f in arcpy.ListFields(overlapping_fc)]:
+        arcpy.management.AddField(overlapping_fc, "Total_Area_ha", "DOUBLE")
 
-    if "CHA_Percent" not in [f.name for f in arcpy.ListFields(overlapping_intersect)]:
-        arcpy.management.AddField(overlapping_intersect, "CHA_Percent", "DOUBLE")
+    # --------------------------------------------------
+    # 3. CALCULATE AREAS (HECTARES)
+    # --------------------------------------------------
+    arcpy.management.CalculateGeometryAttributes(
+        overlapping_intersect,
+        [["CHA_Area_ha", "AREA_GEODESIC"]],
+        area_unit="HECTARES"
+    )
 
-    # ------------------------
-    # Planarized: Calculate CHA % overlap
-    # ------------------------
-    with arcpy.da.UpdateCursor(planarized_intersect, [intersect_area_field, orig_area_field_planarized, "CHA_Percent"]) as cursor:
-        for row in cursor:
-            original_ha = area_ha(row[1])  # convert original area to ha
-            overlap_ha = area_ha(row[0])   # convert intersect area to ha
-            row[2] = (overlap_ha / original_ha * 100) if original_ha > 0 else 0
-            cursor.updateRow(row)
+    arcpy.management.CalculateGeometryAttributes(
+        overlapping_fc,
+        [["Total_Area_ha", "AREA_GEODESIC"]],
+        area_unit="HECTARES"
+    )
 
-    # ------------------------
-    # Overlapping: Calculate CHA % overlap
-    # ------------------------
-    with arcpy.da.UpdateCursor(overlapping_intersect, [intersect_area_field, orig_area_field_overlapping, "CHA_Percent"]) as cursor:
-        for row in cursor:
-            original_ha = area_ha(row[1])  # convert original area to ha
-            overlap_ha = area_ha(row[0])   # convert intersect area to ha
-            row[2] = (overlap_ha / original_ha * 100) if original_ha > 0 else 0
-            cursor.updateRow(row)
+    # --------------------------------------------------
+    # 4. SUM CHA AREA
+    # (store in SAME output_gdb to stay consistent)
+    # --------------------------------------------------
+    summary_table = os.path.join(output_gdb, f"cha_overlap_summary_{date_suffix}")
+
+    if arcpy.Exists(summary_table):
+        arcpy.management.Delete(summary_table)
+
+    arcpy.analysis.Statistics(
+        overlapping_intersect,
+        summary_table,
+        [["CHA_Area_ha", "SUM"]],
+        ["designation"]   # 🔴 CHANGE if needed (e.g. "LAND")
+    )
+
+    # --------------------------------------------------
+    # 5. SUM TOTAL AREA
+    # --------------------------------------------------
+    total_area_table = os.path.join(output_gdb, f"designation_total_area_{date_suffix}")
+
+    if arcpy.Exists(total_area_table):
+        arcpy.management.Delete(total_area_table)
+
+    arcpy.analysis.Statistics(
+        overlapping_fc,
+        total_area_table,
+        [["Total_Area_ha", "SUM"]],
+        ["designation"]   # 🔴 MUST MATCH ABOVE
+    )
+
+    # --------------------------------------------------
+    # 6. JOIN TABLES
+    # --------------------------------------------------
+    arcpy.management.JoinField(
+        summary_table,
+        "designation",        # 🔴 CHANGE if needed
+        total_area_table,
+        "designation",        # 🔴 SAME FIELD
+        ["SUM_Total_Area_ha"]
+    )
+
+    # --------------------------------------------------
+    # 7. CALCULATE %
+    # --------------------------------------------------
+    if "CHA_Percent" not in [f.name for f in arcpy.ListFields(summary_table)]:
+        arcpy.management.AddField(summary_table, "CHA_Percent", "DOUBLE")
+
+    arcpy.management.CalculateField(
+        summary_table,
+        "CHA_Percent",
+        "(!SUM_CHA_Area_ha! / !SUM_Total_Area_ha!) * 100",
+        "PYTHON3"
+    )
 
     print("[Step 4/7] CHA percentage calculation complete.")
-
     # ---------------------------------
     # STEP 5
     # ---------------------------------
