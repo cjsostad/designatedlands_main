@@ -1,7 +1,5 @@
 """
-Tested and working 03_16_26
-
-Run the full designatedlands pipeline in sequence.
+Run the full designatedlands pipeline in sequence....
 
 This script orchestrates the complete Designated Lands analysis for
 British Columbia, combining 40+ spatial designation layers (parks,
@@ -55,8 +53,7 @@ import datetime
 import arcpy
 
 from designatedlands import DesignatedLands, log_arcpy_messages, set_log_level
-from Create_CHA_AOI import prepare_cha   # <-- import CHA script
-from intersect_area_calc import run_cha_intersection
+from create_cha import prepare_cha   # <-- import CHA script (retry + fallback, no AOI)
 
 LOG = logging.getLogger(__name__)
 
@@ -221,6 +218,14 @@ def main():
             "name": src.get("name", ""),
             "query": src.get("query", ""),
         })
+    # Include supporting sources (e.g. Critical Habitat Area filter)
+    for src in DL.sources_supporting:
+        if src.get("query", "").strip():
+            source_queries.append({
+                "designation": src.get("designation", ""),
+                "name": src.get("name", ""),
+                "query": src.get("query", ""),
+            })
 
     pipeline_options = {
         "recent_only": DL.recent_only,
@@ -287,20 +292,87 @@ def main():
     if not arcpy.Exists(output_gdb):
         arcpy.management.CreateFileGDB(os.path.join(script_dir, "outputs"), "designatedlands_output.gdb")
 
-    # Date-stamped output names
+    # Date-stamped output feature classes
     now = datetime.datetime.now()
     date_suffix = now.strftime("%m_%d")
+    planarized_intersect = os.path.join(output_gdb, f"designations_planarized_cha_{date_suffix}")
+    overlapping_intersect = os.path.join(output_gdb, f"designations_overlapping_cha_{date_suffix}")
 
-    run_cha_intersection(
-        cha_fc=cha_fc,
-        planarized_fc=planarized_fc,
-        overlapping_fc=overlapping_fc,
-        output_gdb=output_gdb,
-        planarized_out_name=f"designations_planarized_cha_{date_suffix}",
-        overlapping_out_name=f"designations_overlapping_cha_{date_suffix}",
+    # Use all CPU cores for faster processing
+    arcpy.env.parallelProcessingFactor = "100%"
+
+    # -------------------------------------------------
+    # Intersect 1 — Planarized
+    # -------------------------------------------------
+    print("[Step 4/7] Intersecting designations_planarized with CHA...")
+
+    arcpy.analysis.PairwiseIntersect(
+        [planarized_fc, cha_fc],
+        planarized_intersect,
+        "ALL"
     )
 
-    print("[Step 4/7] CHA intersection and area calculation complete.")
+    print("[Step 4/7] designations_planarized_cha created.")
+
+    # -------------------------------------------------
+    # Intersect 2 — Overlapping
+    # -------------------------------------------------
+    print("[Step 4/7] Intersecting designations_overlapping with CHA...")
+
+    arcpy.analysis.PairwiseIntersect(
+        [overlapping_fc, cha_fc],
+        overlapping_intersect,
+        "ALL"
+    )
+
+    print("[Step 4/7] designations_overlapping_cha created.")
+    print("[Step 4/7] CHA intersections complete.\n")
+
+    print("[Step 4/7] Calculating CHA overlap percentages...")
+
+    planarized_cha = planarized_intersect
+    planarized_fc = os.path.join(DL.gdb, "designations_planarized")
+
+    # Field names in your layers
+    orig_area_field_planarized = "Shape_Area"   # UPDATE if different in planarized_fc
+    orig_area_field_overlapping = "Shape_Area"  # UPDATE if different in overlapping_fc
+    intersect_area_field = "Shape_Area"         # UPDATE if different in intersect outputs
+
+    # Function to calculate area in hectares
+    def area_ha(value_in_m2):
+        return value_in_m2 / 10000.0
+    
+    # -------------------------------------------------
+    # Make sure CHA_Percent field exists
+    # -------------------------------------------------
+    if "CHA_Percent" not in [f.name for f in arcpy.ListFields(planarized_intersect)]:
+        arcpy.management.AddField(planarized_intersect, "CHA_Percent", "DOUBLE")
+
+    if "CHA_Percent" not in [f.name for f in arcpy.ListFields(overlapping_intersect)]:
+        arcpy.management.AddField(overlapping_intersect, "CHA_Percent", "DOUBLE")
+
+    # ------------------------
+    # Planarized: Calculate CHA % overlap
+    # ------------------------
+    with arcpy.da.UpdateCursor(planarized_intersect, [intersect_area_field, orig_area_field_planarized, "CHA_Percent"]) as cursor:
+        for row in cursor:
+            original_ha = area_ha(row[1])  # convert original area to ha
+            overlap_ha = area_ha(row[0])   # convert intersect area to ha
+            row[2] = (overlap_ha / original_ha * 100) if original_ha > 0 else 0
+            cursor.updateRow(row)
+
+    # ------------------------
+    # Overlapping: Calculate CHA % overlap
+    # ------------------------
+    with arcpy.da.UpdateCursor(overlapping_intersect, [intersect_area_field, orig_area_field_overlapping, "CHA_Percent"]) as cursor:
+        for row in cursor:
+            original_ha = area_ha(row[1])  # convert original area to ha
+            overlap_ha = area_ha(row[0])   # convert intersect area to ha
+            row[2] = (overlap_ha / original_ha * 100) if original_ha > 0 else 0
+            cursor.updateRow(row)
+
+    print("[Step 4/7] CHA percentage calculation complete.")
+
     # ---------------------------------
     # STEP 5
     # ---------------------------------
