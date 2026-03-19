@@ -49,7 +49,7 @@ import argparse
 import logging
 import os
 import sys
-from datetime import datetime
+import datetime
 import arcpy
 
 from designatedlands import DesignatedLands, log_arcpy_messages, set_log_level
@@ -293,7 +293,7 @@ def main():
         arcpy.management.CreateFileGDB(os.path.join(script_dir, "outputs"), "designatedlands_output.gdb")
 
     # Date-stamped output feature classes
-    now = datetime.now()
+    now = datetime.datetime.now()
     date_suffix = now.strftime("%m_%d")
     planarized_intersect = os.path.join(output_gdb, f"designations_planarized_cha_{date_suffix}")
     overlapping_intersect = os.path.join(output_gdb, f"designations_overlapping_cha_{date_suffix}")
