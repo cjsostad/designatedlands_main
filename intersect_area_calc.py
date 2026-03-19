@@ -1,5 +1,5 @@
 """
-perform_area_calculation.py — CHA intersection and overlap percentage calculation.
+intersect_area_calc.py — CHA intersection and overlap percentage calculation.
 
 Intersects designations_planarized and designations_overlapping with
 Critical Habitat Area (CHA), then calculates per-designation overlap
@@ -8,10 +8,10 @@ percentages via Statistics + JoinField.
 Can be run standalone or imported as a module:
 
     Standalone:
-        python perform_area_calculation.py
+        python intersect_area_calc.py
 
     As module (from pipeline scripts):
-        from perform_area_calculation import run_cha_intersection
+        from intersect_area_calc import run_cha_intersection
         run_cha_intersection(cha_fc, planarized_fc, overlapping_fc, output_gdb)
 """
 
@@ -174,11 +174,16 @@ def run_cha_intersection(
 # Standalone mode
 # --------------------------------------------------
 if __name__ == "__main__":
-    gdb = r"\\spatialfiles.bcgov\srm\gss\sandbox\srahimi\designatedlands_main\designatedlands.gdb"
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    gdb = os.path.join(script_dir, "designatedlands.gdb")
+    output_gdb = os.path.join(script_dir, "outputs", "designatedlands_output.gdb")
 
     run_cha_intersection(
-        cha_fc=os.path.join(gdb, "critical_habitat_area"),
+        cha_fc=os.path.join(
+            script_dir, "source_data",
+            "critical_habitat_area.gdb", "critical_habitat_area"
+        ),
         planarized_fc=os.path.join(gdb, "designations_planarized"),
         overlapping_fc=os.path.join(gdb, "designations_overlapping"),
-        output_gdb=gdb,
+        output_gdb=output_gdb,
     )

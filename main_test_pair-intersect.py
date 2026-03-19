@@ -56,7 +56,7 @@ import arcpy
 
 from designatedlands import DesignatedLands, log_arcpy_messages, set_log_level
 from Create_CHA_AOI import prepare_cha   # <-- import CHA script
-from perform_area_calculation import run_cha_intersection
+from intersect_area_calc import run_cha_intersection
 
 LOG = logging.getLogger(__name__)
 
