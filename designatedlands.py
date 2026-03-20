@@ -936,28 +936,60 @@ class DesignatedLands:
         Call this before preprocess/process-vector when download was skipped
         to fail fast with a clear message instead of crashing mid-operation.
 
+        When ``recent_only`` is enabled, missing *designation* sources are
+        expected (date-filtered WFS queries often return 0 features) and
+        are logged as warnings rather than causing a fatal error.  Missing
+        *supporting* sources are always fatal because they are required
+        regardless of the date filter.
+
         Raises
         ------
         RuntimeError
-            If one or more source feature classes are missing.
+            If one or more supporting source feature classes are missing,
+            or if designation sources are missing when ``recent_only`` is
+            not active.
         """
-        missing = []
+        missing_designations = []
         for source in self.sources:
             src_fc = os.path.join(self.gdb, source["src"])
             if not arcpy.Exists(src_fc):
-                missing.append(source["src"])
+                missing_designations.append(source["src"])
+
+        missing_supporting = []
         for source in self.sources_supporting:
             src_fc = os.path.join(self.gdb, source["src"])
             if not arcpy.Exists(src_fc):
-                missing.append(source["src"])
-        if missing:
+                missing_supporting.append(source["src"])
+
+        # Supporting layers are always required
+        if missing_supporting:
             raise RuntimeError(
-                f"{len(missing)} source feature class(es) missing from GDB "
-                f"(download may have been skipped or cleanup removed them):\n"
-                + "\n".join(f"  - {m}" for m in missing)
+                f"{len(missing_supporting)} supporting feature class(es) missing "
+                f"from GDB:\n"
+                + "\n".join(f"  - {m}" for m in missing_supporting)
             )
-        LOG.info("All %d source feature classes verified in GDB.",
-                 len(self.sources) + len(self.sources_supporting))
+
+        if missing_designations:
+            if self.recent_only:
+                LOG.warning(
+                    "%d designation source(s) not in GDB (expected when "
+                    "date filter returns 0 features):\n%s",
+                    len(missing_designations),
+                    "\n".join(f"  - {m}" for m in missing_designations),
+                )
+            else:
+                raise RuntimeError(
+                    f"{len(missing_designations)} source feature class(es) "
+                    f"missing from GDB (download may have been skipped or "
+                    f"cleanup removed them):\n"
+                    + "\n".join(f"  - {m}" for m in missing_designations)
+                )
+
+        present = (len(self.sources) - len(missing_designations)
+                   + len(self.sources_supporting))
+        LOG.info("Verified %d source feature classes in GDB "
+                 "(%d designation sources not present).",
+                 present, len(missing_designations))
 
     # ------------------------------------------------------------------
     # Preprocess

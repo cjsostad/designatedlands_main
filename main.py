@@ -92,9 +92,9 @@ def main():
     START_DATE     = "2025-04-01"   # Start of date window (YYYY-MM-DD)
     END_DATE       = None           # End of date window (None = today)
     EXCLUDE_FEDERAL = True          # Exclude National Parks, NWAs, Migratory Bird Sanctuaries
-    SKIP_DOWNLOAD  = True          # True = skip WFS download (use existing data in GDB)
+    SKIP_DOWNLOAD  = False          # True = skip WFS download (use existing data in GDB)
     SKIP_CLEANUP   = False          # True = keep intermediate feature classes
-    RASTER         = False          # True = create raster outputs (requires Spatial Analyst)
+    RASTER         = False          # True = create raster outputs (requires Spatial Analyst)gmai
     # =================================================================
 
     # ---------------------------------

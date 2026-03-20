@@ -537,6 +537,57 @@ Non-overlapping output. Where designations overlap, the polygon is assigned to t
 | `mine_restriction_max` | Maximum mine restriction |
 
 
+## CHA Intersection Outputs
+
+When the CHA (Critical Habitat Area) intersection step runs, it produces two intersect feature classes and two summary tables in the output geodatabase. These outputs answer two distinct questions about the relationship between designated lands and Critical Habitat Areas.
+
+### `cha_overlap_summary`
+
+A **per-designation** summary table that answers: *"What percentage of each designation overlaps with Critical Habitat Area?"*
+
+Built by intersecting `designations_overlapping` with the CHA feature class, then aggregating areas by designation. The key fields are:
+
+| Field | Description |
+|-------|-------------|
+| `designation` | The designation code (e.g., `park_provincial`, `ogma_legal`) |
+| `SUM_Overlap_Area_ha` | Total area (hectares) of this designation that falls **inside** CHA polygons. Computed by running geodesic area calculation on the intersect result (overlapping designations clipped to CHA), then summing by designation. |
+| `SUM_Total_Area_ha` | Total area (hectares) of this designation **overall** (before intersection with CHA). Computed from the original `designations_overlapping` layer and joined in. |
+| `CHA_Percent` | The percentage of the designation's total area that overlaps with CHA. |
+
+The percentage is calculated as:
+
+$$\text{CHA\_Percent} = \frac{\text{SUM\_Overlap\_Area\_ha}}{\text{SUM\_Total\_Area\_ha}} \times 100$$
+
+**How to read it:** Each row represents one designation. A `CHA_Percent` of 12.5 means that 12.5% of that designation's total provincial area falls within Critical Habitat Areas. A designation with no CHA overlap will not appear in this table.
+
+### `cha_protection_summary`
+
+A **per-CHA-polygon** summary table that answers: *"What percentage of each individual CHA polygon is covered by overlapping designations?"*
+
+Built by grouping the intersect result by `FID_critical_habitat_area` (the CHA polygon ID carried through from the intersection), then summing the overlap area and comparing it to the original CHA polygon area. The key fields are:
+
+| Field | Description |
+|-------|-------------|
+| `FID_critical_habitat_area` | The unique identifier for each CHA polygon |
+| `SUM_Overlap_Area_ha` | Total area (hectares) of all designation overlaps within this CHA polygon |
+| `FIRST_Area_ha` | The original area (hectares) of this CHA polygon (from the `Area_ha` field in the CHA source) |
+| `Total_CHA_Protected_Pct` | The percentage of this CHA polygon that is covered by designated lands |
+
+The percentage is calculated as:
+
+$$\text{Total\_CHA\_Protected\_Pct} = \frac{\text{SUM\_Overlap\_Area\_ha}}{\text{FIRST\_Area\_ha}} \times 100$$
+
+**How to read it:** Each row represents one CHA polygon. A `Total_CHA_Protected_Pct` of 85.0 means that 85% of that particular CHA polygon's area is covered by one or more designated land designations. Values are capped at 100%.
+
+### Per-feature `CHA_Protected_Pct`
+
+In addition to the summary tables, the intersect feature classes (`designations_planarized_cha` and `designations_overlapping_cha`) each contain a `CHA_Protected_Pct` field on every individual feature. This shows what fraction of the original CHA polygon is represented by that specific intersect fragment:
+
+$$\text{CHA\_Protected\_Pct} = \frac{\text{Overlap\_Area\_ha}}{\text{Area\_ha}} \times 100$$
+
+
+---
+
 ## Raster Outputs (Optional)
 
 When `--raster` is enabled, four GeoTIFFs are produced in `outputs/`:
