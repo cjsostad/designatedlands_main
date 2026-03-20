@@ -985,11 +985,17 @@ class DesignatedLands:
                     + "\n".join(f"  - {m}" for m in missing_designations)
                 )
 
-        present = (len(self.sources) - len(missing_designations)
-                   + len(self.sources_supporting))
+        present_designations = len(self.sources) - len(missing_designations)
+        present = present_designations + len(self.sources_supporting)
         LOG.info("Verified %d source feature classes in GDB "
                  "(%d designation sources not present).",
                  present, len(missing_designations))
+
+        return {
+            "present": present,
+            "missing_designations": len(missing_designations),
+            "total_designations": len(self.sources),
+        }
 
     # ------------------------------------------------------------------
     # Preprocess
@@ -1012,6 +1018,11 @@ class DesignatedLands:
             op = source["preprocess_operation"].strip().lower()
             src_fc = os.path.join(self.gdb, source["src"])
             out_fc = os.path.join(self.gdb, source["preprc"])
+
+            if not arcpy.Exists(src_fc):
+                LOG.info("Skipping preprocess for %s — source FC not present",
+                         source["src"])
+                continue
 
             if arcpy.Exists(out_fc):
                 arcpy.management.Delete(out_fc)

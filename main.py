@@ -94,7 +94,7 @@ def main():
     EXCLUDE_FEDERAL = True          # Exclude National Parks, NWAs, Migratory Bird Sanctuaries
     SKIP_DOWNLOAD  = False          # True = skip WFS download (use existing data in GDB)
     SKIP_CLEANUP   = False          # True = keep intermediate feature classes
-    RASTER         = False          # True = create raster outputs (requires Spatial Analyst)gmai
+    RASTER         = False          # True = create raster outputs (requires Spatial Analyst)gmai   
     # =================================================================
 
     # ---------------------------------
@@ -251,8 +251,17 @@ def main():
 
     print("[Pre-check] Verifying source feature classes in GDB...")
     LOG.info("=== Pre-check: verify sources ===")
-    run_step("verify-sources", DL.verify_sources)
-    print("[Pre-check] All sources present.\n")
+    verify_result = DL.verify_sources()
+    log_arcpy_messages("verify-sources")
+    n_present = verify_result["present"]
+    n_missing = verify_result["missing_designations"]
+    n_total = verify_result["total_designations"]
+    if n_missing:
+        print(f"[Pre-check] {n_present} sources present, "
+              f"{n_missing}/{n_total} designation sources skipped "
+              f"(no features in date window).\n")
+    else:
+        print(f"[Pre-check] All {n_present} sources present.\n")
 
     # ---------------------------------
     # STEP 3
