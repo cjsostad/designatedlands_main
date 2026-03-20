@@ -927,6 +927,39 @@ class DesignatedLands:
             )
 
     # ------------------------------------------------------------------
+    # Verify sources exist in GDB
+    # ------------------------------------------------------------------
+
+    def verify_sources(self):
+        """Check that all expected source feature classes exist in the GDB.
+
+        Call this before preprocess/process-vector when download was skipped
+        to fail fast with a clear message instead of crashing mid-operation.
+
+        Raises
+        ------
+        RuntimeError
+            If one or more source feature classes are missing.
+        """
+        missing = []
+        for source in self.sources:
+            src_fc = os.path.join(self.gdb, source["src"])
+            if not arcpy.Exists(src_fc):
+                missing.append(source["src"])
+        for source in self.sources_supporting:
+            src_fc = os.path.join(self.gdb, source["src"])
+            if not arcpy.Exists(src_fc):
+                missing.append(source["src"])
+        if missing:
+            raise RuntimeError(
+                f"{len(missing)} source feature class(es) missing from GDB "
+                f"(download may have been skipped or cleanup removed them):\n"
+                + "\n".join(f"  - {m}" for m in missing)
+            )
+        LOG.info("All %d source feature classes verified in GDB.",
+                 len(self.sources) + len(self.sources_supporting))
+
+    # ------------------------------------------------------------------
     # Preprocess
     # ------------------------------------------------------------------
 

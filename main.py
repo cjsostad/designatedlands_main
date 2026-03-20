@@ -246,6 +246,15 @@ def main():
     print(f"[Report] Saved to {xlsx_path}\n")
 
     # ---------------------------------
+    # PRE-CHECK: verify all sources exist
+    # ---------------------------------
+
+    print("[Pre-check] Verifying source feature classes in GDB...")
+    LOG.info("=== Pre-check: verify sources ===")
+    run_step("verify-sources", DL.verify_sources)
+    print("[Pre-check] All sources present.\n")
+
+    # ---------------------------------
     # STEP 3
     # ---------------------------------
 
