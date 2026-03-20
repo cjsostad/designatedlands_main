@@ -475,8 +475,8 @@ def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
 
     opts = pipeline_options or {}
     option_rows = [
-        ("Date filtering (recent only)",
-         "Enabled" if opts.get("recent_only") else "Disabled"),
+        ("Date filter — only new/modified designations",
+         "Enabled" if opts.get("recent_only") else "Disabled (full dataset)"),
         ("Start date", opts.get("start_date", summary.get("start_date", ""))),
         ("End date", opts.get("end_date", summary.get("end_date", ""))),
         ("Exclude federal layers",

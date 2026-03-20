@@ -34,17 +34,18 @@ Pipeline steps:
                         from the working GDB to free disk space.
 
 Defaults (can be run with no arguments from VS Code):
+  - Date filtering is ON by default — only features added/modified
+    between START_DATE and END_DATE are downloaded and processed.
   - Federal layers (National Parks, National Wildlife Areas, Migratory
-    Bird Sanctuaries) are excluded by default (--exclude-federal).
+    Bird Sanctuaries) are excluded by default.
   - Raster processing is off by default (no Spatial Analyst license).
   - All other steps run automatically.
+
+To change options, edit the PIPELINE OPTIONS block at the top of main().
 
 Usage:
     python main.py
     python main.py --config path/to/config.cfg
-    python main.py --skip-cleanup
-    python main.py --no-exclude-federal
-    python main.py --raster
     python main.py --verbose
 """
 import argparse
@@ -65,37 +66,17 @@ LOG = logging.getLogger(__name__)
 
 
 def build_parser():
+    """Parse CLI args for --config and --verbose/--quiet only.
+
+    All pipeline options are set in the PIPELINE OPTIONS block at the
+    top of main() so they can be edited directly in VS Code.
+    """
     parser = argparse.ArgumentParser(
         description="Run the full designatedlands pipeline."
     )
-
     parser.add_argument("--config", "-c", metavar="CONFIG_FILE", default=None)
-
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--quiet", "-q", action="store_true")
-
-    parser.add_argument("--skip-download", action="store_true")
-
-    parser.add_argument(
-        "--raster",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-    )
-
-    parser.add_argument("--skip-cleanup", action="store_true")
-
-    parser.add_argument("--recent-only", action="store_true")
-
-    parser.add_argument("--start-date", metavar="YYYY-MM-DD", default=None)
-
-    parser.add_argument("--end-date", metavar="YYYY-MM-DD", default=None)
-
-    parser.add_argument(
-        "--exclude-federal",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-    )
-
     return parser
 
 
@@ -103,6 +84,18 @@ def main():
 
     parser = build_parser()
     args = parser.parse_args()
+
+    # =================================================================
+    # PIPELINE OPTIONS  —  Edit these directly, then hit Run in VS Code
+    # =================================================================
+    RECENT_ONLY    = True           # True = only process features new/modified in date window
+    START_DATE     = "2025-04-01"   # Start of date window (YYYY-MM-DD)
+    END_DATE       = None           # End of date window (None = today)
+    EXCLUDE_FEDERAL = True          # Exclude National Parks, NWAs, Migratory Bird Sanctuaries
+    SKIP_DOWNLOAD  = True          # True = skip WFS download (use existing data in GDB)
+    SKIP_CLEANUP   = False          # True = keep intermediate feature classes
+    RASTER         = False          # True = create raster outputs (requires Spatial Analyst)
+    # =================================================================
 
     # ---------------------------------
     # Get script directory
@@ -129,11 +122,13 @@ def main():
     print("\n" + "=" * 70)
     print("  DESIGNATED LANDS PIPELINE")
     print("=" * 70)
-    print(f"  Exclude federal layers : {args.exclude_federal}")
-    print(f"  Recent-only filter     : {args.recent_only}")
-    print(f"  Raster processing      : {args.raster}")
-    print(f"  Skip download          : {args.skip_download}")
-    print(f"  Skip cleanup           : {args.skip_cleanup}")
+    print(f"  Date filter (recent only) : {RECENT_ONLY}")
+    print(f"  Start date                : {START_DATE}")
+    print(f"  End date                  : {END_DATE or 'today'}")
+    print(f"  Exclude federal layers    : {EXCLUDE_FEDERAL}")
+    print(f"  Skip download             : {SKIP_DOWNLOAD}")
+    print(f"  Skip cleanup              : {SKIP_CLEANUP}")
+    print(f"  Raster processing         : {RASTER}")
     print("=" * 70 + "\n")
 
     # ---------------------------------
@@ -146,10 +141,10 @@ def main():
 
     DL = DesignatedLands(
         config_file=args.config,
-        recent_only=args.recent_only,
-        start_date=args.start_date,
-        end_date=args.end_date,
-        exclude_federal=args.exclude_federal,
+        recent_only=RECENT_ONLY,
+        start_date=START_DATE,
+        end_date=END_DATE,
+        exclude_federal=EXCLUDE_FEDERAL,
     )
 
     log_arcpy_messages("initialise")
@@ -173,7 +168,7 @@ def main():
     # STEP 2 - DOWNLOAD
     # ---------------------------------
 
-    if not args.skip_download:
+    if not SKIP_DOWNLOAD:
 
         print("[Step 2/7] Downloading designation layers...")
         LOG.info("=== Step 2/7: download ===")
@@ -196,7 +191,7 @@ def main():
 
     else:
 
-        print("[Step 2/7] Download SKIPPED (--skip-download).\n")
+        print("[Step 2/7] Download SKIPPED (SKIP_DOWNLOAD=True).\n")
 
     # ---------------------------------
     # REPORT - Generate xlsx pipeline report
@@ -315,7 +310,7 @@ def main():
     # STEP 5
     # ---------------------------------
 
-    if args.raster:
+    if RASTER:
 
         print("[Step 5/7] Creating raster outputs...")
 
@@ -347,7 +342,7 @@ def main():
     # STEP 7
     # ---------------------------------
 
-    if not args.skip_cleanup:
+    if not SKIP_CLEANUP:
 
         print("[Step 7/7] Cleaning up intermediate data...")
 
@@ -359,7 +354,7 @@ def main():
 
     else:
 
-        print("[Step 7/7] Cleanup SKIPPED (--skip-cleanup).\n")
+        print("[Step 7/7] Cleanup SKIPPED (SKIP_CLEANUP=True).\n")
 
     print("=" * 70)
     print("  PIPELINE COMPLETE")
