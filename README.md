@@ -3,10 +3,9 @@
 
 # Designated Lands — ArcGIS Pro Edition
 
-Under section 63 of the *Species at Risk Act* (SARA), the Government of Canada must report every 180 days on the protection of **Critical Habitat** for listed species on non-federal lands. This pipeline supports that obligation for British Columbia by consolidating 40+ provincial land and marine designations into a single unified *Designated Lands* dataset using **ArcGIS Pro** and **arcpy**, and then intersecting the result with ECCC's **Critical Habitat Area (CHA)** polygons to quantify how much critical habitat is already covered by existing protections. Each designation is categorized by the level of restriction it imposes on three industry sectors — forestry, oil & gas, and mining — at five levels: **Protected**, **Full**, **High**, **Medium**, **Low**, and **None**.
+Under section 63 of the *Species at Risk Act* (SARA), the Government of Canada must report every 180 days on the protection of Critical Habitat for listed species on non-federal lands. This pipeline supports that obligation for British Columbia by consolidating 40+ provincial land and marine designations into a single unified *Designated Lands* dataset using ArcGIS Pro and arcpy, and then intersecting the result with ECCC's **Critical Habitat Area Final (CHA)** polygons to quantify how much critical habitat is already covered by existing protections, with the option to add a date filter to find if there are any new protections implemented in the within the last date range. Each designation is categorized by the level of restriction it imposes on three industry sectors — forestry, oil & gas, and mining — at five levels: **Protected**, **Full**, **High**, **Medium**, **Low**, and **None**.
 
-This is a re-implementation of the [original designatedlands tool](https://github.com/bcgov/designatedlands) (which used PostgreSQL/PostGIS), extended with CHA intersection, date-based change detection, and SARA reporting capabilities. This version replaces the database backend with Esri **File Geodatabases** and arcpy geoprocessing, making it runnable on any workstation with an ArcGIS Pro license.
-
+This is a re-implementation of the [original designatedlands tool](https://github.com/bcgov/designatedlands) (which used PostgreSQL/PostGIS), but extended in this script with CHA intersection, date-based change detection, and SARA reporting capabilities. This version replaces the database backend with Esri File Geodatabases and arcpy geoprocessing, making it runnable on any workstation with an ArcGIS Pro license. For more info on that dataset's methodology read [here](https://www.env.gov.bc.ca/soe/indicators/land/protected-lands-and-waters.html).
 
 ---
 
@@ -18,20 +17,20 @@ This project serves two complementary objectives arising from Canada's **Species
 
 1. **Recurring 180-day report** — Under SARA section 63, the Government of Canada must report every 180 days on the protection of Critical Habitat for listed species. This pipeline produces a date-filtered analysis of newly established or modified designations within a reporting window, intersected with ECCC's Critical Habitat Area (CHA) polygons on non-federal land, quantifying changes in protection coverage since the last report.
 
-2. **Long-term reusable dataset** — Beyond the recurring report, the pipeline produces a comprehensive, province-wide spatial dataset describing all existing protections that overlap with CHA. This dataset can be reused for land-use planning, cumulative-effects assessment, and natural-resource decision-making across the forestry, oil & gas, and mining sectors.
+2. **Long-term reusable dataset** — Beyond the recurring report, the pipeline produces a comprehensive, province-wide spatial dataset of overlapping land designation or planarized land designations as well as a dataset describing all existing protections that overlap with CHA.
 
 ### Data Compilation
 
 Forty-two designation layers are compiled from two categories of sources:
 
 - **BC Geographic Warehouse (BCGW)** — The majority of layers are downloaded programmatically from the province's public Web Feature Service (WFS) endpoint. Each layer is defined in `sources_designations.csv` with a BC Data Catalogue URL, an optional CQL query filter to select the relevant subset of features, and an optional date-filter template for change-detection workflows.
-- **External / federal sources** — A small number of layers (National Parks, National Wildlife Areas, Migratory Bird Sanctuaries, Great Bear Rainforest schedules, Flathead watershed) are downloaded from federal or non-BCGW repositories and stored locally in `source_data/`.
+- **External / federal sources** — A small number of layers (National Parks, National Wildlife Areas, Migratory Bird Sanctuaries, Great Bear Rainforest schedules, Flathead watershed) are downloaded from federal or non-BCGW repositories and stored locally in `source_data/`. *Federal datasets are excluded by default but have an option to be included.
 
-All source data is reprojected to **NAD 1983 BC Environment Albers (EPSG:3005)** and loaded into a working File Geodatabase. Per-source preprocessing (spatial clips, attribute-based dissolves) is applied where required, as defined in the CSV configuration.
+All source data is reprojected to NAD 1983 BC Environment Albers (EPSG:3005) and loaded into a working File Geodatabase. Per-source preprocessing (spatial clips, attribute-based dissolves) is applied where required, as defined in the CSV configuration.
 
 ### Priority System
 
-Each designation is assigned a `process_order` — a positive integer that establishes its **priority** relative to all other designations. A **lower** `process_order` indicates **higher** priority. The ordering reflects the relative stringency and legal standing of each designation:
+Each designation is assigned a `process_order` — a positive integer that establishes its **priority** relative to all other designations. A **lower** `process_order` indicates **higher** priority. The ordering was carried over from the original Land Designations script and reflects the relative stringency and legal standing of each designation:
 
 | Priority tier | process_order range | Examples |
 |---------------|---------------------|----------|
@@ -80,7 +79,7 @@ The planarized output guarantees that every point in BC falls within **at most o
 
 ### Federal Exclusion
 
-Three of the 42 designation layers originate from **federal** jurisdiction (National Parks, National Wildlife Areas, Migratory Bird Sanctuaries). Because this analysis focuses on **provincially-managed** lands and the federal sources are drawn from a separate data repository with different update cycles, these layers are excluded by default. The `jurisdiction` column in the source CSV identifies federal sources, and the `--exclude-federal` / `--no-exclude-federal` flag controls their inclusion at runtime. Excluding federal sources does not affect the process_order numbering of remaining layers — the original ordinal values are preserved to maintain consistency across runs.
+Three of the 42 designation layers originate from **federal** jurisdiction (National Parks, National Wildlife Areas, Migratory Bird Sanctuaries). Because this analysis focuses on **provincially-managed** lands and the federal sources are drawn from a separate data repository with different update cycles, these layers are excluded by default. The `jurisdiction` column in the source CSV identifies federal sources, and the `--exclude-federal` / `--no-exclude-federal` flag controls their inclusion at runtime, alternatively default settings can be hardcoded at the top of main.py. Excluding federal sources does not affect the process_order numbering of remaining layers — the original ordinal values are preserved to maintain consistency across runs.
 
 ### Date-Based Change Detection
 
@@ -115,7 +114,7 @@ All processing is performed in **NAD 1983 BC Environment Albers (EPSG:3005)**, t
 
 ### Data sources
 
-- **BC Geographic Warehouse (BCGW)**: Most designation layers are downloaded automatically via the province's public **WFS endpoint** (`https://openmaps.gov.bc.ca/geo/pub/wfs`). The pipeline resolves BC Data Catalogue URLs to WFS layer names and fetches GeoJSON features with optional CQL query filters.
+- **BC Geographic Warehouse (BCGW)**: Most designation layers are downloaded automatically via the province's public WFS endpoint (`https://openmaps.gov.bc.ca/geo/pub/wfs`). The pipeline resolves BC Data Catalogue URLs to WFS layer names and fetches GeoJSON features with optional CQL query filters.
 - **Manual downloads**: A few sources (e.g., private conservation lands) are not available via WFS. These are placed in the `source_data/` folder and referenced from the CSV.
 
 ### Federal exclusion
@@ -224,10 +223,13 @@ The result is a single FC where all designation polygons are stacked — overlap
 
 Takes `designations_overlapping` and produces a non-overlapping output:
 
+
 1. **Union** (`arcpy.analysis.Union`): Splits all polygons at every intersection boundary, creating planar topology. Every resulting polygon fragment knows which original designations it belonged to.
-2. For each fragment, retains only the designation with the **lowest `process_order`** (highest priority).
-3. **Dissolve** (`arcpy.management.Dissolve`): Merges adjacent fragments with the same designation, computing `MAX` statistics on the restriction fields.
-4. Populates the output using `InsertCursor`, looking up designation names and restriction values from a process_order dictionary.
+2. **Python-based spatial grouping** similar to "disolve": Fragments are grouped by a composite key of centroid coordinates, area, and perimeter (not an `arcpy.management.Dissolve` call). For each group of spatially identical fragments:
+   - The designation with the **lowest `process_order`** (highest priority) is assigned.
+   - `forest_restriction_max`, `og_restriction_max`, and `mine_restriction_max` are set to the MAX across all contributing designations, ensuring the most restrictive level is reported for each sector.
+   - All contributing designation names are collected into a semicolon-delimited `overlapping_designations` field.
+3. Populates the output using `InsertCursor`, writing each unique planar polygon with its aggregated attributes. Each Union fragment retains its original geometry — polygons are not geometrically merged.
 
 The result: every point in BC falls within at most one designation polygon, assigned to the highest-priority overlapping designation.
 
@@ -344,7 +346,7 @@ The following option is set directly in `main.py` (not as a CLI flag):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CHA_FILTER_OUT_WRS` | `True` | `True` = full CHA filter (FINAL + BC + exclude specified species). `False` = minimal CHA filter (FINAL + BC only, all species included). |
+| `CHA_FILTER_OUT_WRS` | `True` | `True` = full CHA filter (FINAL + BC + exclude specified wide ranging species). `False` = minimal CHA filter (FINAL + BC only, all species included). |
 
 ### Subcommand interface
 
@@ -611,8 +613,9 @@ Built by intersecting `designations_overlapping` with the CHA feature class, the
 | Field | Description |
 |-------|-------------|
 | `designation` | The designation code (e.g., `park_provincial`, `ogma_legal`) |
-| `SUM_Overlap_Area_ha` | Total area (hectares) of this designation that falls **inside** CHA polygons. Computed by running geodesic area calculation on the intersect result (overlapping designations clipped to CHA), then summing by designation. |
-| `SUM_Total_Area_ha` | Total area (hectares) of this designation **overall** (before intersection with CHA). Computed from the original `designations_overlapping` layer and joined in. |
+| `FREQUENCY` | The number of intersect fragments that were aggregated into this designation's summary row (auto-generated by `arcpy.analysis.Statistics`). |
+| `SUM_Overlap_Area_ha` | Total area (hectares) of this designation that falls inside CHA polygons. Computed by running geodesic area calculation on the intersect result (overlapping designations clipped to CHA), then summing by designation. |
+| `SUM_Total_Area_ha` | Total area (hectares) of this designation overall (before intersection with CHA). Computed from the original `designations_overlapping` layer and joined in. |
 | `CHA_Percent` | The percentage of the designation's total area that overlaps with CHA. |
 
 The percentage is calculated as:
@@ -629,7 +632,8 @@ Built by grouping the intersect result by `FID_critical_habitat_area` (the CHA p
 
 | Field | Description |
 |-------|-------------|
-| `FID_critical_habitat_area` | The unique identifier for each CHA polygon |
+| `FID_critical_habitat_area` | The unique identifier for each CHA polygon. This field is auto-generated by `arcpy.analysis.PairwiseIntersect` — it carries the original `OBJECTID` of the CHA polygon from the `critical_habitat_area` feature class into the intersect output, allowing each fragment to be traced back to its parent CHA polygon. |
+| `FREQUENCY` | The number of intersect fragments that were aggregated into this CHA polygon's summary row (auto-generated by `arcpy.analysis.Statistics`). |
 | `SUM_Overlap_Area_ha` | Total area (hectares) of all designation overlaps within this CHA polygon |
 | `FIRST_Area_ha` | The original area (hectares) of this CHA polygon (from the `Area_ha` field in the CHA source) |
 | `Total_CHA_Protected_Pct` | The percentage of this CHA polygon that is covered by designated lands |
@@ -645,6 +649,20 @@ $$\text{Total\_CHA\_Protected\_Pct} = \frac{\text{SUM\_Overlap\_Area\_ha}}{\text
 In addition to the summary tables, the intersect feature classes (`designations_planarized_cha` and `designations_overlapping_cha`) each contain a `CHA_Protected_Pct` field on every individual feature. This shows what fraction of the original CHA polygon is represented by that specific intersect fragment:
 
 $$\text{CHA\_Protected\_Pct} = \frac{\text{Overlap\_Area\_ha}}{\text{Area\_ha}} \times 100$$
+
+### How CHA polygons are fragmented
+
+The original CHA polygons enter the pipeline as whole, unfragmented geometries from ECCC's national dataset. During the `PairwiseIntersect` step in `intersect_area_calc.py`, each CHA polygon is split into smaller fragments wherever it crosses a designation polygon boundary. For example:
+
+- **Input**: 1 CHA polygon (500 ha) overlapping 3 designation areas (provincial park, OGMA, wildlife habitat area).
+- **After PairwiseIntersect**: 3 fragment rows (e.g., 180 ha + 220 ha + 100 ha = 500 ha total). Each fragment inherits:
+  - `Area_ha = 500` — the **original** CHA polygon area, carried through as an attribute (unchanged).
+  - `FID_critical_habitat_area` — the original CHA `OBJECTID` (same value on all 3 fragments).
+  - `Overlap_Area_ha` — the fragment's actual geometry area (180, 220, or 100 ha respectively).
+  - `designation`, `process_order`, restriction fields from whichever designation the fragment falls within.
+- **Per-fragment percentage**: `CHA_Protected_Pct = Overlap_Area_ha / Area_ha × 100` (e.g., 180 / 500 = 36%).
+
+The summary tables then **re-aggregate** fragments back to the original CHA polygon level using `FID_critical_habitat_area` as the grouping key. `FIRST(Area_ha)` recovers the original polygon area (since all fragments carry the same value), and `SUM(Overlap_Area_ha)` totals the fragments to compute `Total_CHA_Protected_Pct`.
 
 
 ---
@@ -679,4 +697,6 @@ Each raster includes an attribute table (`.tif.vat.dbf`).
     See the License for the specific language governing permissions and
     limitations under the License.
 
-This repository is maintained by [Environmental Reporting BC](http://www2.gov.bc.ca/gov/content?id=FF80E0B985F245CEA62808414D78C41B). Click [here](https://github.com/bcgov/EnvReportBC-RepoList) for a complete list of our repositories on GitHub.
+This repository was originally posted and  maintained by [Environmental Reporting BC](http://www2.gov.bc.ca/gov/content?id=FF80E0B985F245CEA62808414D78C41B). Click [here](https://github.com/bcgov/designatedlands) for the original Designated Lands Repository. 
+
+Click [here](https://github.com/cjsostad/designatedlands---AG) for the repository that contains the script described in this document.
