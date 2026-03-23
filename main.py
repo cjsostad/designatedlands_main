@@ -88,14 +88,21 @@ def main():
     # =================================================================
     # PIPELINE OPTIONS  —  Edit these directly, then hit Run in VS Code
     # =================================================================
-    RECENT_ONLY    = True           # True = only process features new/modified in date window
+    RECENT_ONLY    = False           # True = only process features new/modified in date window
     START_DATE     = "2025-04-01"   # Start of date window (YYYY-MM-DD)
     END_DATE       = None           # End of date window (None = today)
     EXCLUDE_FEDERAL = True          # Exclude National Parks, NWAs, Migratory Bird Sanctuaries
     SKIP_DOWNLOAD  = False          # True = skip WFS download (use existing data in GDB)
-    SKIP_CLEANUP   = False          # True = keep intermediate feature classes
-    RASTER         = False          # True = create raster outputs (requires Spatial Analyst)gmai   
+    SKIP_CLEANUP   = True          # True = keep intermediate feature classes
+    RASTER         = False          # True = create raster outputs (requires Spatial Analyst)
+    CHA_FILTER_OUT_WRS = False       # True = full CHA filter (FINAL + BC + exclude species)
+                                    # False = minimal CHA filter (FINAL + BC only)
     # =================================================================
+
+    # Naming suffix: when a date filter is active, output FC names are
+    # appended with "_date_filter" so filtered results are immediately
+    # distinguishable from full-run outputs in the GDB.
+    dl_suffix = "_date_filter" if RECENT_ONLY else ""
 
     # ---------------------------------
     # Get script directory
@@ -129,6 +136,7 @@ def main():
     print(f"  Skip download             : {SKIP_DOWNLOAD}")
     print(f"  Skip cleanup              : {SKIP_CLEANUP}")
     print(f"  Raster processing         : {RASTER}")
+    print(f"  CHA filter out WRS        : {CHA_FILTER_OUT_WRS}")
     print("=" * 70 + "\n")
 
     # ---------------------------------
@@ -181,8 +189,15 @@ def main():
 
         print("[Step 2/7] Preparing Critical Habitat Area dataset...")
 
+        cha_query_override = None
+        if not CHA_FILTER_OUT_WRS:
+            cha_query_override = (
+                "RD_Status IN (1) And ProvTerr_E LIKE '%British Columbia%'"
+            )
+
         prepare_cha(
-            source_data_dir=os.path.join(script_dir, "source_data")
+            source_data_dir=os.path.join(script_dir, "source_data"),
+            query_override=cha_query_override,
         )
 
         print("[Step 2/7] CHA preparation complete.\n")
@@ -285,9 +300,9 @@ def main():
 
     LOG.info("=== Step 4/7: process-vector ===")
 
-    run_step("designations-overlapping", DL.create_designations_overlapping)
+    run_step("designations-overlapping", lambda: DL.create_designations_overlapping(suffix=dl_suffix))
 
-    run_step("designations-planarized", DL.create_designations_planarized)
+    run_step("designations-planarized", lambda: DL.create_designations_planarized(suffix=dl_suffix))
 
     print("[Step 4/7] Vector processing complete.\n")
 
@@ -302,8 +317,8 @@ def main():
     )
 
     # Pipeline outputs (intermediate)
-    planarized_fc = os.path.join(DL.gdb, "designations_planarized")
-    overlapping_fc = os.path.join(DL.gdb, "designations_overlapping")
+    planarized_fc = os.path.join(DL.gdb, f"designations_planarized{dl_suffix}")
+    overlapping_fc = os.path.join(DL.gdb, f"designations_overlapping{dl_suffix}")
 
     # Final output gdb
     output_gdb = os.path.join(script_dir, "outputs", "designatedlands_output.gdb")
@@ -319,8 +334,8 @@ def main():
         planarized_fc=planarized_fc,
         overlapping_fc=overlapping_fc,
         output_gdb=output_gdb,
-        planarized_out_name=f"designations_planarized_cha_{date_suffix}",
-        overlapping_out_name=f"designations_overlapping_cha_{date_suffix}",
+        planarized_out_name=f"designations_planarized{dl_suffix}_cha_{date_suffix}",
+        overlapping_out_name=f"designations_overlapping{dl_suffix}_cha_{date_suffix}",
     )
 
     print("[Step 4/7] CHA intersection and area calculation complete.")
@@ -352,7 +367,7 @@ def main():
 
     LOG.info("=== Step 6/7: dump ===")
 
-    run_step("dump", DL.dump)
+    run_step("dump", lambda: DL.dump(suffix=dl_suffix))
 
     print("[Step 6/7] Export complete.\n")
 

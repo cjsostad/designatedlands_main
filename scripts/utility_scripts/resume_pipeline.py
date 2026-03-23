@@ -53,6 +53,12 @@ def build_parser():
         help="Exclude all federally protected areas from the output (default: True)",
     )
     parser.add_argument(
+        "--recent-only",
+        action="store_true",
+        default=False,
+        help="Name outputs with _date_filter suffix (date-filtered run)",
+    )
+    parser.add_argument(
         "--force-from",
         type=int,
         choices=range(1, 8),
@@ -69,6 +75,7 @@ def detect_completed_steps(DL, arcpy, args):
     Returns the next step number to run (1-8, where 8 means all done).
     """
     gdb = DL.gdb
+    dl_suffix = "_date_filter" if args.recent_only else ""
 
     # Step 2: Download — all source FCs loaded?
     all_src_loaded = all(
@@ -90,15 +97,15 @@ def detect_completed_steps(DL, arcpy, args):
         return 3
 
     # Step 4a: Overlapping
-    overlapping_fc = os.path.join(gdb, "designations_overlapping")
+    overlapping_fc = os.path.join(gdb, f"designations_overlapping{dl_suffix}")
     if not arcpy.Exists(overlapping_fc):
-        LOG.info("Auto-detect: designations_overlapping missing — resuming from step 4a (overlapping)")
+        LOG.info("Auto-detect: designations_overlapping%s missing — resuming from step 4a (overlapping)", dl_suffix)
         return 4
 
     # Step 4b: Planarized
-    planarized_fc = os.path.join(gdb, "designations_planarized")
+    planarized_fc = os.path.join(gdb, f"designations_planarized{dl_suffix}")
     if not arcpy.Exists(planarized_fc):
-        LOG.info("Auto-detect: designations_planarized missing — resuming from step 4 (planarized)")
+        LOG.info("Auto-detect: designations_planarized%s missing — resuming from step 4 (planarized)", dl_suffix)
         return 5  # internal: 5 = planarized only (4a done)
 
     # Step 5: Raster (only if requested)
@@ -108,7 +115,7 @@ def detect_completed_steps(DL, arcpy, args):
     out_dir = Path(DL.config["out_path"]).resolve()
     out_gdb = str(out_dir / "designatedlands_output.gdb")
     dump_done = True
-    for fc_name in ("designations_planarized", "designations_overlapping"):
+    for fc_name in (f"designations_planarized{dl_suffix}", f"designations_overlapping{dl_suffix}"):
         if not arcpy.Exists(os.path.join(out_gdb, fc_name)):
             dump_done = False
             break
@@ -151,8 +158,11 @@ def main():
     DL = DesignatedLands(
         config_file=args.config,
         exclude_federal=args.exclude_federal,
+        recent_only=args.recent_only,
     )
     log_arcpy_messages("initialise")
+
+    dl_suffix = "_date_filter" if args.recent_only else ""
 
     # Compact GDB to repair any corruption from interrupted runs
     LOG.info("Compacting GDB...")
@@ -197,14 +207,14 @@ def main():
     # Step 4: Process vector — overlapping
     if resume_from <= 4:
         LOG.info("=== Step 4/7: process-vector (overlapping) ===")
-        run_step("designations-overlapping", DL.create_designations_overlapping)
+        run_step("designations-overlapping", lambda: DL.create_designations_overlapping(suffix=dl_suffix))
     else:
         LOG.info("=== Step 4/7: overlapping (DONE) ===")
 
     # Step 4b/5: Process vector — planarized
     if resume_from <= 5:
         LOG.info("=== Step 4/7: process-vector (planarized) ===")
-        run_step("designations-planarized", DL.create_designations_planarized)
+        run_step("designations-planarized", lambda: DL.create_designations_planarized(suffix=dl_suffix))
     else:
         LOG.info("=== Step 4/7: planarized (DONE) ===")
 
@@ -219,7 +229,7 @@ def main():
     # Step 6: Dump
     if resume_from <= 6:
         LOG.info("=== Step 6/7: dump ===")
-        run_step("dump", DL.dump)
+        run_step("dump", lambda: DL.dump(suffix=dl_suffix))
     else:
         LOG.info("=== Step 6/7: dump (DONE) ===")
 

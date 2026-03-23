@@ -3,9 +3,9 @@
 
 # Designated Lands — ArcGIS Pro Edition
 
-Combine spatial data for 40+ land and marine designations across British Columbia into a single unified *Designated Lands* dataset using **ArcGIS Pro** and **arcpy**. Each designation is categorized by the level of restriction it imposes on three industry sectors — forestry, oil & gas, and mining — at five levels: **Protected**, **Full**, **High**, **Medium**, **Low**, and **None**.
+Under section 63 of the *Species at Risk Act* (SARA), the Government of Canada must report every 180 days on the protection of **Critical Habitat** for listed species on non-federal lands. This pipeline supports that obligation for British Columbia by consolidating 40+ provincial land and marine designations into a single unified *Designated Lands* dataset using **ArcGIS Pro** and **arcpy**, and then intersecting the result with ECCC's **Critical Habitat Area (CHA)** polygons to quantify how much critical habitat is already covered by existing protections. Each designation is categorized by the level of restriction it imposes on three industry sectors — forestry, oil & gas, and mining — at five levels: **Protected**, **Full**, **High**, **Medium**, **Low**, and **None**.
 
-This is a re-implementation of the [original designatedlands tool](https://github.com/bcgov/designatedlands) (which used PostgreSQL/PostGIS). This version replaces the database backend with Esri **File Geodatabases** and arcpy geoprocessing, making it runnable on any workstation with an ArcGIS Pro license.
+This is a re-implementation of the [original designatedlands tool](https://github.com/bcgov/designatedlands) (which used PostgreSQL/PostGIS), extended with CHA intersection, date-based change detection, and SARA reporting capabilities. This version replaces the database backend with Esri **File Geodatabases** and arcpy geoprocessing, making it runnable on any workstation with an ArcGIS Pro license.
 
 
 ---
@@ -14,12 +14,11 @@ This is a re-implementation of the [original designatedlands tool](https://githu
 
 ### Objective
 
-The purpose of this analysis is to consolidate British Columbia's many overlapping protected-area and resource-management designations into a single, authoritative spatial dataset that answers two questions for any point in the province:
+This project serves two complementary objectives arising from Canada's **Species at Risk Act (SARA)** reporting obligations:
 
-1. **Which designations apply here?** (overlapping output)
-2. **Which designation takes precedence?** (planarized output)
+1. **Recurring 180-day report** — Under SARA section 63, the Government of Canada must report every 180 days on the protection of Critical Habitat for listed species. This pipeline produces a date-filtered analysis of newly established or modified designations within a reporting window, intersected with ECCC's Critical Habitat Area (CHA) polygons on non-federal land, quantifying changes in protection coverage since the last report.
 
-The resulting datasets support land-use planning, cumulative-effects assessment, and natural-resource decision-making across the forestry, oil & gas, and mining sectors.
+2. **Long-term reusable dataset** — Beyond the recurring report, the pipeline produces a comprehensive, province-wide spatial dataset describing all existing protections that overlap with CHA. This dataset can be reused for land-use planning, cumulative-effects assessment, and natural-resource decision-making across the forestry, oil & gas, and mining sectors.
 
 ### Data Compilation
 
@@ -85,7 +84,9 @@ Three of the 42 designation layers originate from **federal** jurisdiction (Nati
 
 ### Date-Based Change Detection
 
-An optional date-filter mode (`--recent-only`) restricts the analysis to designations established or modified within a specified time window. Each source row in the CSV defines a `date_filter_query` template (e.g., `ESTABLISHMENT_DATE >= '{start_date}'`) that is injected into the WFS CQL filter at download time. Sources without a date-filterable attribute (noted as *"no date field available"* or *"non-BCGW source"*) are excluded from date-filtered runs. An xlsx report is generated summarising the changes, excluded layers, feature counts, and pipeline options used.
+A date-filter mode (`--recent-only`) restricts the analysis to designations established or modified within a specified time window, directly supporting the 180-day SARA reporting cycle. Each source row in the CSV defines a `date_filter_query` template (e.g., `ESTABLISHMENT_DATE >= '{start_date}'`) that is injected into the WFS CQL filter at download time. Sources without a date-filterable attribute (noted as *"no date field available"* or *"non-BCGW source"*) are excluded from date-filtered runs. An xlsx report is generated summarising the changes, excluded layers, feature counts, and pipeline options used.
+
+When the date filter is active, all output feature class and table names are automatically suffixed with `_date_filter` (e.g., `designations_overlapping_date_filter`, `designations_planarized_date_filter`, `cha_overlap_summary_date_filter_03_20`) so that date-filtered outputs are immediately distinguishable from full-run outputs in the geodatabase.
 
 ### Limitations
 
@@ -295,6 +296,7 @@ python main.py
 
 This will:
 - Exclude federal layers (National Parks, NWA, MBS)
+- Apply the full CHA definition query (FINAL + BC + species exclusions)
 - Skip raster processing
 - Download all layers, preprocess, build vector outputs, export, and clean up
 
@@ -337,6 +339,12 @@ python main.py --verbose
 | `--start-date` | 2025-04-01 | Start of date filter window |
 | `--end-date` | today | End of date filter window |
 | `--exclude-federal` / `--no-exclude-federal` | on | Exclude/include federal designations |
+
+The following option is set directly in `main.py` (not as a CLI flag):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CHA_FILTER_OUT_WRS` | `True` | `True` = full CHA filter (FINAL + BC + exclude specified species). `False` = minimal CHA filter (FINAL + BC only, all species included). |
 
 ### Subcommand interface
 
@@ -408,7 +416,7 @@ Defines all 42 designation layers. Each row configures one data source. Key colu
 
 ### `sources_supporting.csv`
 
-Defines 6 supporting layers used during processing (not designation layers themselves):
+Defines 7 supporting layers used during processing (not designation layers themselves):
 
 - **BCGS 1:20k Grid** (`tiles_20k`) — tile index for parallel processing
 - **NTS 250k Grid** (`tiles_250k`) — national topographic tile index
@@ -416,6 +424,7 @@ Defines 6 supporting layers used during processing (not designation layers thems
 - **BC Boundary Land** (`bc_boundary_land`) — terrestrial boundary
 - **Marine Ecosections** (`marine_ecosections`) — marine ecological zones
 - **Muskwa-Kechika Boundary** (`mk_boundary`) — management area for clipping
+- **Critical Habitat Area** (`critical_habitat_area`) — ECCC's Critical Habitat polygons (filtered to FINAL status, British Columbia, terrestrial species) used for the CHA intersection step
 
 
 ---
@@ -428,9 +437,13 @@ Defines 6 supporting layers used during processing (not designation layers thems
 ├── main.py                          # Full pipeline runner (recommended entry point)
 ├── designatedlands.py               # Core DesignatedLands class and geoprocessing logic
 ├── date_filter.py                   # Date-based filtering and xlsx report generation
-├── resume_pipeline.py               # Smart resume with auto-detection of completed steps
+├── create_cha.py                    # Download and prepare the CHA dataset from ECCC
+├── Create_CHA_AOI.py               # CHA preparation with AOI clip (for testing)
+├── intersect_area_calc.py           # CHA × designation intersection and area calculations
+├── find_schema.py                   # Query BCGW WFS for date/time fields in source schemas
+├── _test_all_cql.py                 # Validate all CQL queries against WFS endpoints
 ├── sources_designations.csv         # 42 designation source definitions
-├── sources_supporting.csv           # 6 supporting layer definitions
+├── sources_supporting.csv           # 7 supporting layer definitions (incl. CHA)
 ├── designatedlands_sample_config.cfg  # Example configuration file
 ├── designatedlands.gdb/             # Working File Geodatabase (intermediate data)
 ├── source_data/                     # Downloaded / manual source data files
@@ -440,6 +453,9 @@ Defines 6 supporting layers used during processing (not designation layers thems
 ├── logs/                            # Timestamped run logs
 ├── rasters/                         # Raster outputs (when --raster is used)
 └── scripts/                         # Utility scripts
+    └── utility_scripts/
+        ├── resume_pipeline.py       # Smart resume with auto-detection of completed steps
+        └── run_planarized.py        # Standalone planarized output runner
 ```
 
 ### `main.py` — Pipeline Orchestrator
@@ -452,6 +468,7 @@ Key responsibilities:
 - Wraps each step in `run_step()` which captures arcpy messages and logs failures
 - Generates an xlsx report when federal exclusion or date filtering is active
 - Controls optional steps (raster, cleanup) via CLI flags
+- Controls the CHA definition query scope via `CHA_FILTER_OUT_WRS` — when `False`, overrides the CSV query to include all species (FINAL + BC only)
 
 ### `designatedlands.py` — Core Processing Engine
 
@@ -503,12 +520,54 @@ Provides date-based WFS queries and xlsx report generation using **openpyxl**:
 
 Resumes from the first incomplete step, or can be overridden with `--force-from STEP`.
 
+### `create_cha.py` — CHA Dataset Preparation
+
+Downloads and prepares the **Critical Habitat Area (CHA)** dataset from ECCC's national data portal:
+
+- Reads the CHA entry from `sources_supporting.csv` (URL, definition query, field mappings).
+- Downloads `CriticalHabitat.zip` with retry logic (up to 3 attempts) and extracts the geodatabase into `source_data/`.
+- Applies the definition query to filter to **FINAL** status, **British Columbia** province, and (by default) excludes specified species. When called with `query_override`, uses the provided query instead of the CSV-defined one.
+- Falls back to an existing local copy of `CriticalHabitat.gdb` if all download attempts fail.
+
+Can be run standalone (`python create_cha.py`) or called from the pipeline via `prepare_cha()`.
+
+### `Create_CHA_AOI.py` — CHA with AOI Clip (Testing)
+
+A testing variant of `create_cha.py` that adds an **Area of Interest (AOI)** clip. Filters the CHA dataset to a spatial extent for faster development iterations, producing a smaller feature class suitable for debugging the intersection workflow without processing the full provincial dataset.
+
+### `intersect_area_calc.py` — CHA Intersection & Area Calculations
+
+Performs the spatial intersection between designated lands and CHA, then quantifies protection coverage:
+
+- `run_cha_intersection()` — Master function that intersects both `designations_planarized` and `designations_overlapping` with the CHA feature class.
+- Calculates geodesic overlap areas (hectares) and produces two summary tables:
+  - **`cha_overlap_summary`** — Per-designation summary: what percentage of each designation overlaps with CHA.
+  - **`cha_protection_summary`** — Per-CHA-polygon summary: what percentage of each CHA polygon is covered by designated lands.
+- Adds `CHA_Protected_Pct` to each intersect feature for per-fragment protection percentages.
+
+Can be run standalone or imported as a module from the pipeline.
+
+### `find_schema.py` — WFS Schema Inspector
+
+Queries the BCGW WFS `DescribeFeatureType` endpoint for each layer referenced in the source CSVs and reports any fields whose XML schema type contains `date` or `time`. Used during initial configuration to identify which source layers support date-based filtering.
+
+### `_test_all_cql.py` — CQL Query Validator
+
+Validates every CQL query defined in the source CSVs against the live WFS endpoint:
+
+1. Checks that all field names referenced in CQL filters exist in the WFS schema (via `DescribeFeatureType`).
+2. Sends each CQL filter to the WFS endpoint and verifies it returns HTTP 200.
+
+Run before production pipeline executions to catch broken or outdated CQL queries early.
+
 
 ---
 
 ## Vector Outputs
 
 The `dump` step writes two feature classes to `outputs/designatedlands_output.gdb`:
+
+> **Naming convention:** When the date filter is active (`--recent-only`), all output names are suffixed with `_date_filter` (e.g., `designations_overlapping_date_filter`, `designations_planarized_date_filter`). This ensures date-filtered outputs are immediately distinguishable from full-run outputs when both exist in the same geodatabase.
 
 ### `designations_overlapping`
 
@@ -540,6 +599,8 @@ Non-overlapping output. Where designations overlap, the polygon is assigned to t
 ## CHA Intersection Outputs
 
 When the CHA (Critical Habitat Area) intersection step runs, it produces two intersect feature classes and two summary tables in the output geodatabase. These outputs answer two distinct questions about the relationship between designated lands and Critical Habitat Areas.
+
+> **Naming convention:** CHA output names include a date stamp (`_MM_DD`). When the date filter is active, `_date_filter` is inserted before the `_cha` segment (e.g., `designations_planarized_date_filter_cha_03_20`, `cha_overlap_summary_date_filter_03_20`).
 
 ### `cha_overlap_summary`
 

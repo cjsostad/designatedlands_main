@@ -130,7 +130,8 @@ def _download_cha_zip(url, dest_dir):
     return None
 
 
-def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None):
+def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None,
+                query_override=None):
     """
     Download the CHA archive, extract it, apply the definition query,
     and write the filtered feature class into source_data/.
@@ -211,7 +212,10 @@ def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None):
     )
 
     # Apply definition query and export
-    sql_where = cfg["query"].strip('"') or ""
+    if query_override is not None:
+        sql_where = query_override
+    else:
+        sql_where = cfg["query"].strip('"') or ""
     print(f"[CHA] Applying definition query and exporting...")
     LOG.info("CHA query: %s", sql_where)
 

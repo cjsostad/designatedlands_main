@@ -1107,12 +1107,19 @@ class DesignatedLands:
     # Vector processing
     # ------------------------------------------------------------------
 
-    def create_designations_overlapping(self):
+    def create_designations_overlapping(self, suffix=""):
         """
         Create a single feature class holding all designation polygons, clipped
         to the BC terrestrial boundary. Overlaps are preserved.
+
+        Parameters
+        ----------
+        suffix : str
+            Optional suffix appended to the output FC name
+            (e.g. "_date_filter" when a date window is active).
         """
-        out_fc = os.path.join(self.gdb, "designations_overlapping")
+        fc_name = f"designations_overlapping{suffix}"
+        out_fc = os.path.join(self.gdb, fc_name)
         bc_land = os.path.join(self.gdb, "bc_boundary_land")
 
         if arcpy.Exists(out_fc):
@@ -1121,7 +1128,7 @@ class DesignatedLands:
         # Template feature class (defined by bc_boundary_land projection)
         arcpy.management.CreateFeatureclass(
             self.gdb,
-            "designations_overlapping",
+            fc_name,
             "POLYGON",
             spatial_reference=arcpy.SpatialReference(3005),
         )
@@ -1156,7 +1163,7 @@ class DesignatedLands:
                 LOG.warning("Source not found, skipping: %s", src_fc)
                 continue
 
-            LOG.info("Inserting %s into designations_overlapping", source["designation"])
+            LOG.info("Inserting %s into %s", source["designation"], fc_name)
 
             # Clip source to bc_boundary_land first
             clipped_tmp = os.path.join(self.gdb, "clip_tmp")
@@ -1214,9 +1221,9 @@ class DesignatedLands:
 
         # Build spatial index
         arcpy.management.AddSpatialIndex(out_fc)
-        LOG.info("designations_overlapping created")
+        LOG.info("%s created", fc_name)
 
-    def create_designations_planarized(self):
+    def create_designations_planarized(self, suffix=""):
         """
         From designations_overlapping, remove overlaps using Union + ranking.
 
@@ -1231,10 +1238,19 @@ class DesignatedLands:
             across all overlapping designations
           - records ALL contributing designation names in a semicolon-
             delimited ``overlapping_designations`` field
+
+        Parameters
+        ----------
+        suffix : str
+            Optional suffix appended to the output FC name
+            (e.g. "_date_filter" when a date window is active).
+            Must match the suffix used in create_designations_overlapping().
         """
-        LOG.info("Creating designations_planarized")
-        overlapping_fc = os.path.join(self.gdb, "designations_overlapping")
-        out_fc = os.path.join(self.gdb, "designations_planarized")
+        planarized_name = f"designations_planarized{suffix}"
+        overlapping_name = f"designations_overlapping{suffix}"
+        LOG.info("Creating %s", planarized_name)
+        overlapping_fc = os.path.join(self.gdb, overlapping_name)
+        out_fc = os.path.join(self.gdb, planarized_name)
 
         if arcpy.Exists(out_fc):
             arcpy.management.Delete(out_fc)
@@ -1258,7 +1274,7 @@ class DesignatedLands:
         # Create output feature class
         arcpy.management.CreateFeatureclass(
             self.gdb,
-            "designations_planarized",
+            planarized_name,
             "POLYGON",
             spatial_reference=arcpy.SpatialReference(3005),
         )
@@ -1405,7 +1421,7 @@ class DesignatedLands:
         except Exception:
             LOG.warning("Could not delete temp FC %s", union_tmp)
         arcpy.management.AddSpatialIndex(out_fc)
-        LOG.info("designations_planarized created with %d features", len(groups))
+        LOG.info("%s created with %d features", planarized_name, len(groups))
 
     # ------------------------------------------------------------------
     # Raster processing
@@ -1579,8 +1595,14 @@ class DesignatedLands:
     # Dump outputs
     # ------------------------------------------------------------------
 
-    def dump(self):
-        """Export output feature classes to a File Geodatabase."""
+    def dump(self, suffix=""):
+        """Export output feature classes to a File Geodatabase.
+
+        Parameters
+        ----------
+        suffix : str
+            Optional suffix appended to FC names (e.g. "_date_filter").
+        """
         out_dir = Path(self.config["out_path"]).resolve()
         out_dir.mkdir(parents=True, exist_ok=True)
         out_gdb_name = "designatedlands_output.gdb"
@@ -1590,7 +1612,7 @@ class DesignatedLands:
             arcpy.management.CreateFileGDB(str(out_dir), out_gdb_name)
             LOG.info("Created output File Geodatabase: %s", out_gdb)
 
-        for fc_name in ("designations_planarized", "designations_overlapping"):
+        for fc_name in (f"designations_planarized{suffix}", f"designations_overlapping{suffix}"):
             fc_path = os.path.join(self.gdb, fc_name)
             if not arcpy.Exists(fc_path):
                 LOG.warning("%s not found — skipping dump", fc_name)
@@ -1818,15 +1840,17 @@ def main():
         DL.create_bc_boundary()
 
     elif cmd == "process-vector":
-        DL.create_designations_overlapping()
-        DL.create_designations_planarized()
+        dl_suffix = "_date_filter" if DL.recent_only else ""
+        DL.create_designations_overlapping(suffix=dl_suffix)
+        DL.create_designations_planarized(suffix=dl_suffix)
 
     elif cmd == "process-raster":
         DL.rasterize()
         DL.overlay_rasters()
 
     elif cmd == "dump":
-        DL.dump()
+        dl_suffix = "_date_filter" if DL.recent_only else ""
+        DL.dump(suffix=dl_suffix)
 
     elif cmd == "overlay":
         DL.overlay(

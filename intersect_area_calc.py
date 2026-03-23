@@ -66,12 +66,25 @@ def run_cha_intersection(
     planarized_intersect = os.path.join(output_gdb, planarized_out_name)
     overlapping_intersect = os.path.join(output_gdb, overlapping_out_name)
 
-    # Derive a suffix from the output name for summary tables
-    # e.g. "designations_planarized_cha_03_19" → suffix = "_03_19"
-    suffix = planarized_out_name.replace("designations_planarized_cha", "")
-    summary_name = f"cha_overlap_summary{suffix}"
-    total_area_name = f"designation_total_area{suffix}"
-    cha_protection_name = f"cha_protection_summary{suffix}"
+    # Derive a suffix from the output name for summary tables.
+    # The planarized output name follows the pattern:
+    #   "designations_planarized[_date_filter]_cha[_MM_DD]"
+    # We split at "_cha" to separate the filter tag from the date portion.
+    # Examples:
+    #   "designations_planarized_cha_03_19"              → filter_tag="", date_part="_03_19"
+    #   "designations_planarized_date_filter_cha_03_20"  → filter_tag="_date_filter", date_part="_03_20"
+    #   "designations_planarized_cha"                    → filter_tag="", date_part=""
+    cha_idx = planarized_out_name.find("_cha")
+    if cha_idx != -1:
+        filter_tag = planarized_out_name[len("designations_planarized"):cha_idx]
+        date_part = planarized_out_name[cha_idx + len("_cha"):]
+    else:
+        filter_tag = planarized_out_name[len("designations_planarized"):]
+        date_part = ""
+
+    summary_name = f"cha_overlap_summary{filter_tag}{date_part}"
+    total_area_name = f"designation_total_area{filter_tag}{date_part}"
+    cha_protection_name = f"cha_protection_summary{filter_tag}{date_part}"
 
     print("=" * 60)
     print("  CHA INTERSECT + OVERLAP % CALCULATION")
