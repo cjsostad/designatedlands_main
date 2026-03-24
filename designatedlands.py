@@ -32,6 +32,7 @@ import shutil
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.request
 import zipfile
 from functools import wraps
@@ -97,6 +98,16 @@ class _LoggerStream:
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
+
+# Local working directory — all File Geodatabases are created here to avoid
+# network-share locking/flushing issues.  Resolves to something like
+# C:\Users\<user>\AppData\Local\designatedlands\
+LOCAL_WORK_DIR = os.path.join(
+    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+    "designatedlands",
+)
+LOCAL_SOURCE_CACHE_DIR = os.path.join(LOCAL_WORK_DIR, "source_data")
+LOCAL_OUTPUT_DIR = os.path.join(LOCAL_WORK_DIR, "outputs")
 
 DEFAULT_CONFIG = {
     "dl_path": "source_data",
@@ -311,11 +322,40 @@ def download_file(url: str, path: str, filename: str, overwrite: bool = False):
     The extract folder is named by a hash of the URL so the same URL is only
     downloaded once.
     """
-    out_folder = os.path.join(path, hashlib.sha224(url.encode("utf-8")).hexdigest())
-    out_file = os.path.join(out_folder, filename)
+    # Keep cache folder names short to reduce ArcGIS/Windows path issues.
+    folder_name = hashlib.sha224(url.encode("utf-8")).hexdigest()[:16]
+    out_folder = os.path.join(path, folder_name)
 
     if overwrite and os.path.exists(out_folder):
-        shutil.rmtree(out_folder)
+        removed = False
+        last_exc = None
+        for attempt in range(3):
+            try:
+                shutil.rmtree(out_folder)
+                removed = True
+                break
+            except OSError as exc:
+                last_exc = exc
+                if attempt < 2:
+                    LOG.warning(
+                        "Could not remove existing extract folder %s (%s) — retrying",
+                        out_folder, exc,
+                    )
+                    time.sleep(2)
+
+        if not removed:
+            out_folder = os.path.join(
+                path,
+                f"{folder_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            )
+            LOG.warning(
+                "Could not remove existing extract folder after retries (%s) — "
+                "using fresh folder %s",
+                last_exc,
+                out_folder,
+            )
+
+    out_file = os.path.join(out_folder, filename)
 
     if not os.path.exists(out_folder):
         LOG.info("Downloading %s", url)
@@ -324,10 +364,27 @@ def download_file(url: str, path: str, filename: str, overwrite: bool = False):
         fp = tempfile.NamedTemporaryFile("wb", suffix=suffix, delete=False)
         try:
             if parsed.scheme in ("http", "https"):
-                resp = requests.get(url, stream=True, verify=False, timeout=(30, 300))
-                resp.raise_for_status()
-                for chunk in resp.iter_content(chunk_size=8192):
-                    fp.write(chunk)
+                max_retries = 3
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        resp = requests.get(url, stream=True, verify=False, timeout=(30, 300))
+                        resp.raise_for_status()
+                        for chunk in resp.iter_content(chunk_size=8192):
+                            fp.write(chunk)
+                        break
+                    except (requests.ConnectionError, requests.Timeout) as exc:
+                        if attempt < max_retries:
+                            wait = 5 * attempt
+                            LOG.warning(
+                                "Download attempt %d/%d failed (%s) — retrying in %ds",
+                                attempt, max_retries, exc, wait,
+                            )
+                            import time
+                            time.sleep(wait)
+                            fp.seek(0)
+                            fp.truncate()
+                        else:
+                            raise
             elif parsed.scheme == "ftp":
                 with urllib.request.urlopen(url) as download:
                     while True:
@@ -348,6 +405,19 @@ def download_file(url: str, path: str, filename: str, overwrite: bool = False):
         os.unlink(fp.name)
 
     return out_file, out_folder
+
+
+def source_dataset_exists(src_file: str, layer: str = None) -> bool:
+    """Return True when the expected source dataset is present and readable."""
+    if layer:
+        if os.path.isfile(src_file):
+            return os.path.exists(src_file)
+        return arcpy.Exists(os.path.join(src_file, layer))
+
+    if os.path.exists(src_file):
+        return True
+
+    return arcpy.Exists(src_file)
 
 
 def resolve_catalogue_to_wfs_layer(slug: str) -> str:
@@ -472,19 +542,52 @@ def download_bcgw_wfs(
             if "coordinates" in geom:
                 geom["coordinates"] = _drop_z(geom["coordinates"])
 
-    # Write GeoJSON to a temp file and load with arcpy
+    # Write GeoJSON to a temp file and load with arcpy.
+    # JSONToFeatures refuses to overwrite an existing FC (even with
+    # overwriteOutput=True) and fails on network GDB paths.  Work
+    # around this by writing to a *local* scratch GDB first, then
+    # CopyFeatures into the real destination (CopyFeatures respects
+    # overwriteOutput reliably).
     with tempfile.NamedTemporaryFile(
         "w", suffix=".geojson", delete=False, encoding="utf-8"
     ) as tf:
         json.dump(geojson_data, tf)
         tf_path = tf.name
 
+    scratch_fc = os.path.join(
+        arcpy.env.scratchGDB,
+        "dl_scratch_" + os.path.basename(out_fc),
+    )
+
     try:
+        # Clean up any leftover scratch FC from a previous run
+        if arcpy.Exists(scratch_fc):
+            arcpy.management.Delete(scratch_fc)
+
         with arcpy.EnvManager(outputZFlag="Disabled", outputMFlag="Disabled"):
-            arcpy.conversion.JSONToFeatures(tf_path, out_fc)
+            arcpy.conversion.JSONToFeatures(tf_path, scratch_fc)
+
+        # CopyFeatures honours overwriteOutput — safe for network GDBs.
+        # On UNC paths, Delete + immediate Create can race; retry if needed.
+        for attempt in range(3):
+            try:
+                arcpy.management.CopyFeatures(scratch_fc, out_fc)
+                break
+            except Exception:
+                if attempt == 2:
+                    raise
+                LOG.warning(
+                    "CopyFeatures attempt %d failed for %s — retrying "
+                    "after Delete + pause", attempt + 1, out_fc,
+                )
+                if arcpy.Exists(out_fc):
+                    arcpy.management.Delete(out_fc)
+                time.sleep(3)
         LOG.info("  Loaded %s into %s", package, out_fc)
     finally:
         os.unlink(tf_path)
+        if arcpy.Exists(scratch_fc):
+            arcpy.management.Delete(scratch_fc)
 
 
 def load_file_to_gdb(
@@ -523,7 +626,21 @@ def load_file_to_gdb(
         src = src_file
 
     arcpy.management.MakeFeatureLayer(src, temp_lyr, sql_where or "")
-    arcpy.conversion.FeatureClassToFeatureClass(temp_lyr, gdb, fc_name)
+    for attempt in range(3):
+        try:
+            arcpy.conversion.FeatureClassToFeatureClass(temp_lyr, gdb, fc_name)
+            break
+        except Exception:
+            if attempt == 2:
+                raise
+            LOG.warning(
+                "FeatureClassToFeatureClass attempt %d failed for %s — "
+                "retrying after Delete + pause", attempt + 1, fc_name,
+            )
+            out_fc = os.path.join(gdb, fc_name)
+            if arcpy.Exists(out_fc):
+                arcpy.management.Delete(out_fc)
+            time.sleep(3)
     arcpy.management.Delete(temp_lyr)
     LOG.info("  Done loading %s", fc_name)
 
@@ -586,8 +703,12 @@ class DesignatedLands:
 
         # Date filter settings
         self.recent_only = recent_only
-        self.start_date = start_date or "2025-04-01"
-        self.end_date = end_date or date.today().isoformat()
+        if recent_only:
+            self.start_date = start_date or "2025-04-01"
+            self.end_date = end_date or date.today().isoformat()
+        else:
+            self.start_date = start_date
+            self.end_date = end_date
         self.exclude_federal = exclude_federal
         self.federal_excluded_sources = []  # populated by _read_sources
         if self.recent_only:
@@ -611,6 +732,27 @@ class DesignatedLands:
                 raise ConfigValueError(f"Config file not found: {config_file}")
             self._read_config(config_file)
 
+        self.repo_source_data_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "source_data",
+        )
+
+        dl_path_cfg = self.config["dl_path"]
+        if os.path.isabs(dl_path_cfg):
+            self.source_data_dir = dl_path_cfg
+        else:
+            self.source_data_dir = os.path.join(LOCAL_WORK_DIR, dl_path_cfg)
+        self.config["dl_path"] = self.source_data_dir
+
+        out_path_cfg = self.config["out_path"]
+        if os.path.isabs(out_path_cfg):
+            self.config["out_path"] = out_path_cfg
+        else:
+            self.config["out_path"] = os.path.join(LOCAL_OUTPUT_DIR)
+
+        self.archive_cache_dir = LOCAL_SOURCE_CACHE_DIR
+        os.makedirs(self.archive_cache_dir, exist_ok=True)
+
         # Resolve process count
         import multiprocessing
         cpu_count = multiprocessing.cpu_count()
@@ -622,8 +764,16 @@ class DesignatedLands:
         # Set arcpy parallel processing
         arcpy.env.parallelProcessingFactor = str(self.config["n_processes"])
 
-        # Initialize File Geodatabase workspace
-        self.gdb = os.path.abspath(self.config["gdb_path"])
+        # Initialize File Geodatabase workspace.
+        # Always place the working GDB on the local C: drive to avoid
+        # network-share FGDB locking/flushing issues.  If the user
+        # provides an absolute path (e.g. D:\...) we honour it; otherwise
+        # we resolve relative names under LOCAL_WORK_DIR.
+        gdb_cfg = self.config["gdb_path"]
+        if os.path.isabs(gdb_cfg):
+            self.gdb = gdb_cfg
+        else:
+            self.gdb = os.path.join(LOCAL_WORK_DIR, gdb_cfg)
         self._init_workspace()
 
         # Set arcpy environment
@@ -662,11 +812,50 @@ class DesignatedLands:
         """Create the File Geodatabase if it does not already exist."""
         gdb_dir = os.path.dirname(os.path.abspath(self.gdb))
         gdb_name = os.path.basename(self.gdb)
+
+        need_create = False
         if not arcpy.Exists(self.gdb):
+            need_create = True
+        else:
+            # Validate it is actually a File Geodatabase, not a plain folder
+            try:
+                desc = arcpy.Describe(self.gdb)
+                if getattr(desc, "dataType", "") != "Workspace" or \
+                   getattr(desc, "workspaceType", "") != "LocalDatabase":
+                    LOG.warning(
+                        "%s exists but is not a valid File Geodatabase "
+                        "(dataType=%s, workspaceType=%s). Recreating.",
+                        self.gdb,
+                        getattr(desc, "dataType", "?"),
+                        getattr(desc, "workspaceType", "?"),
+                    )
+                    self._remove_invalid_gdb()
+                    need_create = True
+            except Exception:
+                LOG.warning(
+                    "%s exists but cannot be described. Recreating.",
+                    self.gdb,
+                )
+                self._remove_invalid_gdb()
+                need_create = True
+
+        if need_create:
+            os.makedirs(gdb_dir, exist_ok=True)
             LOG.info("Creating File Geodatabase: %s", self.gdb)
             arcpy.management.CreateFileGDB(gdb_dir, gdb_name)
         else:
             LOG.info("Using existing File Geodatabase: %s", self.gdb)
+
+    def _remove_invalid_gdb(self):
+        """Remove an invalid .gdb path (plain folder or corrupt FGDB)."""
+        try:
+            arcpy.management.Delete(self.gdb)
+        except Exception:
+            # arcpy.Delete may fail on plain folders; fall back to shutil
+            if os.path.isdir(self.gdb):
+                shutil.rmtree(self.gdb)
+            else:
+                os.remove(self.gdb)
 
     def _read_config(self, config_file: str):
         """Read a .cfg configuration file (INI format)."""
@@ -818,8 +1007,19 @@ class DesignatedLands:
     # Download
     # ------------------------------------------------------------------
 
-    def download(self, designation: str = None, overwrite: bool = False):
-        """Download source data and load into the File Geodatabase."""
+    def download(
+        self,
+        designation: str = None,
+        overwrite: bool = False,
+        refresh_archives: bool = False,
+    ):
+        """Download source data and load into the File Geodatabase.
+
+        ``overwrite`` rebuilds feature classes in the working GDB.
+        ``refresh_archives`` separately controls whether archive-based
+        sources are re-downloaded and re-extracted or whether cached
+        extracted folders under ``dl_path`` are reused.
+        """
         sources = self.sources_supporting + self.sources
 
         if designation:
@@ -833,11 +1033,7 @@ class DesignatedLands:
         for source in [s for s in sources if s.get("manual_download", "") != "T"]:
             out_fc = os.path.join(self.gdb, source["src"])
 
-            if overwrite and arcpy.Exists(out_fc):
-                LOG.info("Dropping existing feature class: %s", source["src"])
-                arcpy.management.Delete(out_fc)
-
-            if arcpy.Exists(out_fc):
+            if not overwrite and arcpy.Exists(out_fc):
                 LOG.info("%s already loaded — skipping", source["src"])
                 continue
 
@@ -874,12 +1070,68 @@ class DesignatedLands:
                 layer_in_file = source.get("layer_in_file", "") or None
                 sql_query = source.get("query", "") or None
 
-                local_file, _ = download_file(
-                    url=url,
-                    path=self.config["dl_path"],
-                    filename=file_in_url,
-                    overwrite=overwrite,
-                )
+                # Try downloading; fall back to a local copy if present
+                local_file = None
+                try:
+                    local_file, _ = download_file(
+                        url=url,
+                        path=self.archive_cache_dir,
+                        filename=file_in_url,
+                        overwrite=refresh_archives,
+                    )
+                except Exception as exc:
+                    # Check for a local copy alongside the source data
+                    fallback_candidates = [
+                        os.path.join(self.archive_cache_dir, file_in_url),
+                        os.path.join(self.source_data_dir, file_in_url),
+                        os.path.join(self.repo_source_data_dir, file_in_url),
+                    ]
+                    fallback = next(
+                        (candidate for candidate in fallback_candidates if os.path.exists(candidate)),
+                        None,
+                    )
+                    if fallback:
+                        if os.path.abspath(fallback).startswith(
+                            os.path.abspath(self.repo_source_data_dir)
+                        ):
+                            local_fallback = os.path.join(self.source_data_dir, file_in_url)
+                            os.makedirs(os.path.dirname(local_fallback), exist_ok=True)
+                            if os.path.isdir(fallback):
+                                if os.path.exists(local_fallback):
+                                    shutil.rmtree(local_fallback)
+                                shutil.copytree(fallback, local_fallback)
+                            else:
+                                shutil.copy2(fallback, local_fallback)
+                            fallback = local_fallback
+                        LOG.warning(
+                            "Download failed for '%s' (%s) — using local copy: %s",
+                            source["designation"], exc, fallback,
+                        )
+                        local_file = fallback
+                    else:
+                        raise
+
+                if not source_dataset_exists(local_file, layer_in_file):
+                    if refresh_archives:
+                        raise FileNotFoundError(
+                            f"Expected dataset not found after refresh: {local_file}"
+                        )
+
+                    LOG.warning(
+                        "Cached source for '%s' is missing expected dataset; refreshing archive",
+                        source["designation"],
+                    )
+                    local_file, _ = download_file(
+                        url=url,
+                        path=self.archive_cache_dir,
+                        filename=file_in_url,
+                        overwrite=True,
+                    )
+
+                    if not source_dataset_exists(local_file, layer_in_file):
+                        raise FileNotFoundError(
+                            f"Expected dataset not found after refresh: {local_file}"
+                        )
 
                 # Determine layer name if not specified
                 if not layer_in_file:
@@ -906,9 +1158,7 @@ class DesignatedLands:
                     f"in '{self.config['dl_path']}'"
                 )
             out_fc = os.path.join(self.gdb, source["src"])
-            if overwrite and arcpy.Exists(out_fc):
-                arcpy.management.Delete(out_fc)
-            if arcpy.Exists(out_fc):
+            if not overwrite and arcpy.Exists(out_fc):
                 LOG.info("%s already loaded — skipping", source["src"])
                 continue
 
@@ -925,6 +1175,10 @@ class DesignatedLands:
                 out_fc=out_fc,
                 sql_where=source.get("query", "") or None,
             )
+
+        # Compact the GDB to flush all writes — critical for network FGDB
+        LOG.info("Compacting GDB to flush writes: %s", self.gdb)
+        arcpy.management.Compact(self.gdb)
 
     # ------------------------------------------------------------------
     # Verify sources exist in GDB
@@ -949,6 +1203,14 @@ class DesignatedLands:
             or if designation sources are missing when ``recent_only`` is
             not active.
         """
+        # Log what's actually in the GDB for diagnostics
+        prev_ws = arcpy.env.workspace
+        arcpy.env.workspace = self.gdb
+        fc_list = arcpy.ListFeatureClasses() or []
+        arcpy.env.workspace = prev_ws
+        LOG.info("GDB contains %d feature classes: %s",
+                 len(fc_list), ", ".join(sorted(fc_list)[:20]))
+
         missing_designations = []
         for source in self.sources:
             src_fc = os.path.join(self.gdb, source["src"])
@@ -1765,7 +2027,14 @@ def build_parser():
     # download
     dl = sub.add_parser("download", help="Download source data and load to GDB")
     dl.add_argument("--designation", "-d", help="Only download this designation")
-    dl.add_argument("--overwrite", action="store_true", help="Re-download existing data")
+    dl.add_argument(
+        "--overwrite", action="store_true",
+        help="Rebuild existing feature classes in the working GDB",
+    )
+    dl.add_argument(
+        "--redownload-archives", action="store_true",
+        help="Re-download and re-extract archive sources instead of using cached extracts",
+    )
 
     # preprocess
     pp = sub.add_parser("preprocess", help="Preprocess sources and create BC boundary")
@@ -1813,8 +2082,11 @@ def main():
         DL.test_connection()
 
     elif cmd == "download":
-        DL.download(designation=getattr(args, "designation", None),
-                    overwrite=args.overwrite)
+        DL.download(
+            designation=getattr(args, "designation", None),
+            overwrite=args.overwrite,
+            refresh_archives=getattr(args, "redownload_archives", False),
+        )
         if DL.recent_only:
             from date_filter import run_report
             script_dir = os.path.dirname(os.path.abspath(__file__))

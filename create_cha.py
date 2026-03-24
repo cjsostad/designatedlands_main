@@ -156,6 +156,9 @@ def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None,
             os.path.dirname(os.path.abspath(__file__)), "source_data",
         )
     os.makedirs(source_data_dir, exist_ok=True)
+    repo_source_data_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "source_data",
+    )
 
     # Output FC goes into a file GDB inside source_data/
     out_gdb = os.path.join(source_data_dir, "critical_habitat_area.gdb")
@@ -166,22 +169,34 @@ def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None,
         print(f"[CHA] Already exists: {out_fc} (use overwrite=True to rebuild)")
         return out_fc
 
-    # Try to download; fall back to existing GDB if download fails
-    src_gdb_path = os.path.join(source_data_dir, CHA_GDB_NAME)
+    # Try to download; fall back to an existing *local* GDB if download fails.
+    # If only the repo copy exists, copy it into the local source_data_dir first
+    # so the rest of the pipeline still runs entirely from local storage.
+    local_src_gdb = os.path.join(source_data_dir, CHA_GDB_NAME)
+    repo_src_gdb = os.path.join(repo_source_data_dir, CHA_GDB_NAME)
 
     print(f"[CHA] Downloading {cfg['url']}...")
     downloaded = _download_cha_zip(cfg["url"], source_data_dir)
 
     if downloaded:
         src_gdb = downloaded
-    elif os.path.exists(src_gdb_path):
-        print(f"[CHA] Falling back to existing {src_gdb_path}")
-        src_gdb = src_gdb_path
     else:
+        src_gdb = None
+        if os.path.exists(local_src_gdb):
+            src_gdb = local_src_gdb
+        elif os.path.exists(repo_src_gdb):
+            print(f"[CHA] Copying repo fallback to local cache: {local_src_gdb}")
+            if os.path.exists(local_src_gdb):
+                shutil.rmtree(local_src_gdb)
+            shutil.copytree(repo_src_gdb, local_src_gdb)
+            src_gdb = local_src_gdb
+    if src_gdb and not downloaded:
+        print(f"[CHA] Falling back to existing {src_gdb}")
+    if not src_gdb:
         raise RuntimeError(
             f"Download failed and no existing {CHA_GDB_NAME} found in "
             f"{source_data_dir}. Download the zip manually, unzip "
-            f"{CHA_GDB_NAME} into {source_data_dir}, and re-run."
+            f"{CHA_GDB_NAME} into that folder, and re-run."
         )
 
     print(f"[CHA] Using source GDB: {src_gdb}")
