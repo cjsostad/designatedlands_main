@@ -6,10 +6,10 @@ extracts the geodatabase, applies the definition query, and writes the
 filtered feature class into source_data/.
 
 Download behaviour:
-  - Attempts to download CriticalHabitat.zip up to 3 times.
-  - On success, extracts CriticalHabitat.gdb directly into source_data/
-    (no hash folders).
-  - If all download attempts fail, falls back to an existing
+    - Attempts to download CriticalHabitat.zip.
+    - On success, extracts CriticalHabitat.gdb directly into source_data/
+        (no hash folders).
+    - If the download fails, falls back to an existing
     source_data/CriticalHabitat.gdb if one is present.
 
 Can be run standalone or called from the pipeline via prepare_cha().
@@ -26,15 +26,13 @@ import os
 import shutil
 import sys
 import tempfile
-import time
+from urllib.request import urlopen
 import zipfile
 
 LOG = logging.getLogger(__name__)
 
 CHA_DESIGNATION = "critical_habitat_area"
 CHA_GDB_NAME = "CriticalHabitat.gdb"
-MAX_RETRIES = 3
-RETRY_DELAY_SECONDS = 10
 
 
 def _find_cha_config(csv_path=None):
@@ -64,70 +62,56 @@ def _find_cha_config(csv_path=None):
 
 def _download_cha_zip(url, dest_dir):
     """
-    Download the CHA zip from *url* with retries, extract CriticalHabitat.gdb
-    directly into *dest_dir* (no hash folders).
+    Download the CHA zip from *url*, extract CriticalHabitat.gdb directly
+    into *dest_dir* (no hash folders).
 
-    Returns the path to the extracted GDB, or None if all attempts failed.
+    Returns the path to the extracted GDB, or None if the download failed.
     """
-    import requests
-
     src_gdb_path = os.path.join(dest_dir, CHA_GDB_NAME)
+    temp_zip_path = None
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        print(f"[CHA] Download attempt {attempt}/{MAX_RETRIES}...")
-        try:
-            resp = requests.get(
-                url, stream=True, verify=False, timeout=(30, 300)
-            )
-            resp.raise_for_status()
+    print(f"[CHA] Downloading archive from {url}...")
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb", suffix=".zip", delete=False, dir=dest_dir
+        ) as temp_file:
+            temp_zip_path = temp_file.name
 
-            tmp = tempfile.NamedTemporaryFile(
-                "wb", suffix=".zip", delete=False, dir=dest_dir
-            )
-            try:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    tmp.write(chunk)
-                tmp.close()
-            except Exception:
-                tmp.close()
-                os.unlink(tmp.name)
-                raise
+        with urlopen(url) as response, open(temp_zip_path, "wb") as output_file:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                output_file.write(chunk)
 
-            # Remove old GDB before extracting
-            if os.path.exists(src_gdb_path):
-                print(f"[CHA] Removing old {CHA_GDB_NAME}...")
-                shutil.rmtree(src_gdb_path)
+        if os.path.exists(src_gdb_path):
+            print(f"[CHA] Removing old {CHA_GDB_NAME}...")
+            shutil.rmtree(src_gdb_path)
 
-            print(f"[CHA] Extracting {CHA_GDB_NAME} into {dest_dir}...")
-            with zipfile.ZipFile(tmp.name, "r") as zf:
-                zf.extractall(dest_dir)
-            os.unlink(tmp.name)
+        print(f"[CHA] Extracting {CHA_GDB_NAME} into {dest_dir}...")
+        with zipfile.ZipFile(temp_zip_path, "r") as zf:
+            zf.extractall(dest_dir)
 
-            # The zip may nest the GDB inside a subfolder — find it
-            if os.path.exists(src_gdb_path):
-                print(f"[CHA] Extracted: {src_gdb_path}")
+        if os.path.exists(src_gdb_path):
+            print(f"[CHA] Extracted: {src_gdb_path}")
+            return src_gdb_path
+
+        for root, dirs, _files in os.walk(dest_dir):
+            if CHA_GDB_NAME in dirs:
+                nested = os.path.join(root, CHA_GDB_NAME)
+                if nested != src_gdb_path:
+                    shutil.move(nested, src_gdb_path)
+                    print(f"[CHA] Moved nested GDB to: {src_gdb_path}")
                 return src_gdb_path
 
-            # Search for it if nested
-            for root, dirs, _files in os.walk(dest_dir):
-                if CHA_GDB_NAME in dirs:
-                    nested = os.path.join(root, CHA_GDB_NAME)
-                    if nested != src_gdb_path:
-                        shutil.move(nested, src_gdb_path)
-                        print(f"[CHA] Moved nested GDB to: {src_gdb_path}")
-                    return src_gdb_path
-
-            print(f"[CHA] WARNING: Zip extracted but {CHA_GDB_NAME} not found")
-            return None
-
-        except Exception as exc:
-            print(f"[CHA] Attempt {attempt} failed: {exc}")
-            if attempt < MAX_RETRIES:
-                print(f"[CHA] Retrying in {RETRY_DELAY_SECONDS} seconds...")
-                time.sleep(RETRY_DELAY_SECONDS)
-
-    print(f"[CHA] All {MAX_RETRIES} download attempts failed.")
-    return None
+        print(f"[CHA] WARNING: Zip extracted but {CHA_GDB_NAME} not found")
+        return None
+    except Exception as exc:
+        print(f"[CHA] Download failed: {exc}")
+        return None
+    finally:
+        if temp_zip_path and os.path.exists(temp_zip_path):
+            os.unlink(temp_zip_path)
 
 
 def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None,
@@ -136,7 +120,7 @@ def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None,
     Download the CHA archive, extract it, apply the definition query,
     and write the filtered feature class into source_data/.
 
-    If the download fails after retries, falls back to an existing
+    If the download fails, falls back to an existing
     CriticalHabitat.gdb in source_data/ (e.g. manually downloaded).
 
     Returns
@@ -156,9 +140,6 @@ def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None,
             os.path.dirname(os.path.abspath(__file__)), "source_data",
         )
     os.makedirs(source_data_dir, exist_ok=True)
-    repo_source_data_dir = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "source_data",
-    )
 
     # Output FC goes into a file GDB inside source_data/
     out_gdb = os.path.join(source_data_dir, "critical_habitat_area.gdb")
@@ -169,34 +150,22 @@ def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None,
         print(f"[CHA] Already exists: {out_fc} (use overwrite=True to rebuild)")
         return out_fc
 
-    # Try to download; fall back to an existing *local* GDB if download fails.
-    # If only the repo copy exists, copy it into the local source_data_dir first
-    # so the rest of the pipeline still runs entirely from local storage.
-    local_src_gdb = os.path.join(source_data_dir, CHA_GDB_NAME)
-    repo_src_gdb = os.path.join(repo_source_data_dir, CHA_GDB_NAME)
+    # Try to download; fall back to existing GDB if download fails
+    src_gdb_path = os.path.join(source_data_dir, CHA_GDB_NAME)
 
     print(f"[CHA] Downloading {cfg['url']}...")
     downloaded = _download_cha_zip(cfg["url"], source_data_dir)
 
     if downloaded:
         src_gdb = downloaded
+    elif os.path.exists(src_gdb_path):
+        print(f"[CHA] Falling back to existing {src_gdb_path}")
+        src_gdb = src_gdb_path
     else:
-        src_gdb = None
-        if os.path.exists(local_src_gdb):
-            src_gdb = local_src_gdb
-        elif os.path.exists(repo_src_gdb):
-            print(f"[CHA] Copying repo fallback to local cache: {local_src_gdb}")
-            if os.path.exists(local_src_gdb):
-                shutil.rmtree(local_src_gdb)
-            shutil.copytree(repo_src_gdb, local_src_gdb)
-            src_gdb = local_src_gdb
-    if src_gdb and not downloaded:
-        print(f"[CHA] Falling back to existing {src_gdb}")
-    if not src_gdb:
         raise RuntimeError(
             f"Download failed and no existing {CHA_GDB_NAME} found in "
             f"{source_data_dir}. Download the zip manually, unzip "
-            f"{CHA_GDB_NAME} into that folder, and re-run."
+            f"{CHA_GDB_NAME} into {source_data_dir}, and re-run."
         )
 
     print(f"[CHA] Using source GDB: {src_gdb}")
@@ -250,6 +219,8 @@ def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None,
 
     print(f"[CHA] Output: {out_fc}")
     LOG.info("CHA feature class created: %s (%d features)", out_fc, count)
+    print(f"[CHA] Done: {out_fc} ({count} features)")
+    LOG.info("CHA preparation complete: %s", out_fc)
     return out_fc
 
 

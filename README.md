@@ -664,6 +664,30 @@ The original CHA polygons enter the pipeline as whole, unfragmented geometries f
 
 The summary tables then **re-aggregate** fragments back to the original CHA polygon level using `FID_critical_habitat_area` as the grouping key. `FIRST(Area_ha)` recovers the original polygon area (since all fragments carry the same value), and `SUM(Overlap_Area_ha)` totals the fragments to compute `Total_CHA_Protected_Pct`.
 
+### Example output contents (verified run: 2026-03-24)
+
+For the run logged in `logs/designatedlands_20260324_192326.log` (`recent_only=True`, federal layers excluded), the output geodatabase `outputs/designatedlands_output.gdb` contained the following objects:
+
+**Feature classes**
+
+- `designations_overlapping_cha`
+- `designations_overlapping_date_filter`
+- `designations_overlapping_date_filter_cha_03_24`
+- `designations_planarized_cha`
+- `designations_planarized_date_filter`
+- `designations_planarized_date_filter_cha_03_24`
+
+**Tables**
+
+- `cha_overlap_summary`
+- `cha_overlap_summary_date_filter_03_24`
+- `cha_protection_summary`
+- `cha_protection_summary_date_filter_03_24`
+- `designation_total_area`
+- `designation_total_area_date_filter_03_24`
+
+This mixed set (base + `_date_filter` + date-stamped `_cha_MM_DD`) is expected when multiple runs write to the same output File GDB over time.
+
 
 ---
 

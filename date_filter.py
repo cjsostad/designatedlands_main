@@ -314,11 +314,10 @@ def _query_feature_count(layer, existing_query, date_filter_cql):
 
 def _unique_xlsx_path(base_path):
     """
-    Return *base_path* if it does not exist yet.
-    Otherwise append today's date (and a counter if needed) before .xlsx.
+    Always append today's date before .xlsx.
+
+    If the dated path already exists, append a counter as well.
     """
-    if not os.path.exists(base_path):
-        return base_path
     root, ext = os.path.splitext(base_path)
     stamped = f"{root}_{date.today().isoformat()}{ext}"
     if not os.path.exists(stamped):
@@ -350,7 +349,8 @@ def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
     out_path : str
         Desired output xlsx path.
     avoid_overwrite : bool
-        If True and *out_path* already exists, append the date to the name.
+        If True, append today's date to the file name.
+        If that dated path already exists, append a counter as well.
     federal_excluded : list[dict] or None
         Each dict has keys: name, designation. Federal layers removed.
     pipeline_options : dict or None
@@ -362,7 +362,7 @@ def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
     Returns
     -------
     str
-        The actual path written (may differ from *out_path* if renamed).
+        The actual path written (may differ from *out_path* if date-stamped).
     """
     if avoid_overwrite:
         out_path = _unique_xlsx_path(out_path)

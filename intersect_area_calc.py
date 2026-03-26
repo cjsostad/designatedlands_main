@@ -20,6 +20,7 @@ Can be run standalone or imported as a module:
 import arcpy
 import logging
 import os
+from gdb_utils import ensure_file_gdb, is_file_gdb
 
 LOG = logging.getLogger(__name__)
 
@@ -62,6 +63,9 @@ def run_cha_intersection(
     # --------------------------------------------------
     arcpy.env.overwriteOutput = True
     arcpy.env.parallelProcessingFactor = "100%"
+    ensure_file_gdb(output_gdb, recreate_invalid=True, logger=LOG)
+    if not is_file_gdb(output_gdb):
+        raise RuntimeError(f"Output path is not a valid File Geodatabase: {output_gdb}")
 
     planarized_intersect = os.path.join(output_gdb, planarized_out_name)
     overlapping_intersect = os.path.join(output_gdb, overlapping_out_name)
@@ -477,9 +481,7 @@ if __name__ == "__main__":
     print(f"Working GDB : {gdb}")
     print(f"Output GDB  : {output_gdb}")
 
-    if not arcpy.Exists(output_gdb):
-        print(f"Creating output GDB: {output_gdb}")
-        arcpy.management.CreateFileGDB(os.path.join(script_dir, "outputs"), "designatedlands_output.gdb")
+    ensure_file_gdb(output_gdb, recreate_invalid=True, logger=LOG)
 
     run_cha_intersection(
         cha_fc=os.path.join(
