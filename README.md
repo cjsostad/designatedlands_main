@@ -513,10 +513,8 @@ Defines 7 supporting layers used during processing (not designation layers thems
 ├── designatedlands.py               # Core DesignatedLands class and geoprocessing logic
 ├── date_filter.py                   # Date-based filtering and xlsx report generation
 ├── create_cha.py                    # Download and prepare the CHA dataset from ECCC
-├── Create_CHA_AOI.py               # CHA preparation with AOI clip (for testing)
 ├── intersect_area_calc.py           # CHA × designation intersection and area calculations
-├── find_schema.py                   # Query BCGW WFS for date/time fields in source schemas
-├── _test_all_cql.py                 # Validate all CQL queries against WFS endpoints
+├── gdb_utils.py                     # File GDB validation/creation helpers used by pipeline
 ├── sources_designations.csv         # 42 designation source definitions
 ├── sources_supporting.csv           # 7 supporting layer definitions (incl. CHA)
 ├── designatedlands_sample_config.cfg  # Example configuration file
@@ -528,10 +526,17 @@ Defines 7 supporting layers used during processing (not designation layers thems
 ├── logs/                            # Timestamped run logs
 ├── rasters/                         # Raster outputs (when --raster is used)
 └── scripts/                         # Utility scripts
-    └── utility_scripts/
-        ├── resume_pipeline.py       # Smart resume with auto-detection of completed steps
-        └── run_planarized.py        # Standalone planarized output runner
+  └── utility_scripts/
+    ├── Create_CHA_AOI.py        # Legacy/alternate CHA AOI preparation helper
+    ├── find_schema.py           # Query BCGW WFS for date/time fields in source schemas
+    ├── _test_all_cql.py         # Validate all CQL queries against WFS endpoints
+    ├── resume_pipeline.py       # Smart resume with auto-detection of completed steps
+    └── run_planarized.py        # Standalone planarized output runner
 ```
+
+Script placement policy:
+- Keep only core pipeline scripts in the repository root (`main.py`, `designatedlands.py`, `date_filter.py`, `create_cha.py`, `intersect_area_calc.py`, `gdb_utils.py`).
+- Place testing, diagnostic, legacy, and one-off utilities under `scripts/utility_scripts/`.
 
 ### `main.py` — Pipeline Orchestrator
 

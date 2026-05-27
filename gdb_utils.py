@@ -1,3 +1,10 @@
+"""
+Utilities for validating and creating ArcGIS File Geodatabases.
+
+This module provides small helpers used by pipeline entrypoints to ensure
+output geodatabase paths are valid File GDB workspaces before writes occur.
+"""
+
 import datetime
 import logging
 import os
