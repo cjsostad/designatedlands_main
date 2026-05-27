@@ -1433,14 +1433,14 @@ class DesignatedLands:
         LOG.info("Reading Union fragments and grouping by spatial location...")
         groups = {}
         read_fields = [
-            "process_order", "designation",
+            "process_order", "designation", "source_id", "source_name",
             "forest_restriction", "og_restriction", "mine_restriction",
             "SHAPE@",
         ]
         frag_count = 0
 
         with arcpy.da.SearchCursor(union_tmp, read_fields) as cur:
-            for po, desig, fr, og, mr, geom in cur:
+            for po, desig, src_id, src_name, fr, og, mr, geom in cur:
                 if geom is None or geom.area == 0:
                     continue
                 if po is None or int(po) <= 0:
@@ -1452,6 +1452,8 @@ class DesignatedLands:
                 og = og if og is not None else 0
                 mr = mr if mr is not None else 0
                 desig = desig or ""
+                src_id = str(src_id).strip() if src_id not in (None, "") else ""
+                src_name = str(src_name).strip() if src_name not in (None, "") else ""
 
                 # Composite key: centroid X/Y (7 dp ≈ 0.01 m in BC Albers)
                 # + area (2 dp) + perimeter (2 dp) to minimise collision
@@ -1467,6 +1469,8 @@ class DesignatedLands:
                 if key not in groups:
                     groups[key] = {
                         "min_po": po,
+                        "winner_source_id": src_id,
+                        "winner_source_name": src_name,
                         "max_fr": fr,
                         "max_og": og,
                         "max_mr": mr,
@@ -1475,7 +1479,28 @@ class DesignatedLands:
                     }
                 else:
                     g = groups[key]
-                    g["min_po"] = min(g["min_po"], po)
+                    if po < g["min_po"]:
+                        g["min_po"] = po
+                        g["winner_source_id"] = src_id
+                        g["winner_source_name"] = src_name
+                    elif po == g["min_po"]:
+                        # Deterministic tie-break: prefer populated source fields,
+                        # then lexicographically smallest values.
+                        current_key = (
+                            0 if g["winner_source_id"] else 1,
+                            0 if g["winner_source_name"] else 1,
+                            g["winner_source_id"],
+                            g["winner_source_name"],
+                        )
+                        candidate_key = (
+                            0 if src_id else 1,
+                            0 if src_name else 1,
+                            src_id,
+                            src_name,
+                        )
+                        if candidate_key < current_key:
+                            g["winner_source_id"] = src_id
+                            g["winner_source_name"] = src_name
                     g["max_fr"] = max(g["max_fr"], fr)
                     g["max_og"] = max(g["max_og"], og)
                     g["max_mr"] = max(g["max_mr"], mr)
@@ -1507,8 +1532,8 @@ class DesignatedLands:
                     data["min_po"],
                     info.get("designation", ""),
                     overlapping_str,
-                    info.get("source_id", ""),
-                    info.get("source_name", ""),
+                    data.get("winner_source_id", ""),
+                    data.get("winner_source_name", ""),
                     data["max_fr"],
                     data["max_mr"],
                     data["max_og"],
