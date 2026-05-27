@@ -362,8 +362,12 @@ def run_cha_intersection(
     # --------------------------------------------------
     # 8. CHA PROTECTION SUMMARY TABLE
     #    Aggregate total protected area per CHA polygon,
-    #    grouped by FID_critical_habitat_area (the renamed
-    #    OBJECTID from PairwiseIntersect).
+    #    grouped by CHA_Source_ID — the original ECCC OBJECTID
+    #    stamped into the CHA feature class before export in
+    #    create_cha.py. Using CHA_Source_ID (rather than the
+    #    auto-reassigned FID_critical_habitat_area) means the
+    #    key in this table can be joined directly back to the
+    #    national CriticalHabitat.gdb on OBJECTID. (2026-05-27)
     #    Wrapped in try/except so the pipeline continues
     #    even if this step fails.
     # --------------------------------------------------
@@ -373,7 +377,7 @@ def run_cha_intersection(
 
         # Verify the required fields exist in the overlapping intersect
         oi_fields = [f.name for f in arcpy.ListFields(overlapping_intersect)]
-        required = ["FID_critical_habitat_area", "Overlap_Area_ha", "Area_ha"]
+        required = ["CHA_Source_ID", "Overlap_Area_ha", "Area_ha"]
         missing = [r for r in required if r not in oi_fields]
         if missing:
             msg = (f"WARNING: Fields {missing} not found in overlapping intersect. "
@@ -391,7 +395,7 @@ def run_cha_intersection(
             overlapping_intersect,
             cha_protection_table,
             [["Overlap_Area_ha", "SUM"], ["Area_ha", "FIRST"]],
-            ["FID_critical_habitat_area"]
+            ["CHA_Source_ID"]
         )
 
         protection_rows = arcpy.management.GetCount(cha_protection_table)[0]

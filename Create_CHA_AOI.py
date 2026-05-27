@@ -157,6 +157,15 @@ def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None):
 
     print(f"[CHA] {count} features remain after filtering")
 
+    # Stamp the original ECCC OBJECTID into a regular attribute field so it
+    # survives FeatureClassToFeatureClass OID re-numbering and flows through
+    # PairwiseIntersect into all output tables. This lets users join
+    # CHA_Source_ID back to the national CriticalHabitat.gdb on OBJECTID
+    # without needing the locally-filtered intermediate copy. (2026-05-27)
+    arcpy.management.AddField(temp_lyr, "CHA_Source_ID", "LONG")
+    arcpy.management.CalculateField(temp_lyr, "CHA_Source_ID", "!OBJECTID!", "PYTHON3")
+    print("[CHA] Stamped original ECCC OBJECTID into CHA_Source_ID field")
+
     arcpy.conversion.FeatureClassToFeatureClass(
         temp_lyr,
         out_gdb,
