@@ -3,7 +3,7 @@
 
 # Designated Lands — ArcGIS Pro Edition
 
-Under section 63 of the *Species at Risk Act* (SARA), the Government of Canada must report every 180 days on the protection of Critical Habitat for listed species on non-federal lands. This pipeline supports that obligation for British Columbia by consolidating 40+ provincial land and marine designations into a single unified *Designated Lands* dataset using ArcGIS Pro and arcpy, and then intersecting the result with ECCC's **Critical Habitat Area Final (CHA)** polygons to quantify how much critical habitat is already covered by existing protections, with the option to add a date filter to find if there are any new protections implemented in the within the last date range. Each designation is categorized by the level of restriction it imposes on three industry sectors — forestry, oil & gas, and mining — at five levels: **Protected**, **Full**, **High**, **Medium**, **Low**, and **None**.
+Under section 63 of the *Species at Risk Act* (SARA), the Government of British Columbia must report every 180 days on the protection of Critical Habitat for listed species on non-federal lands. This pipeline supports that obligation for British Columbia by consolidating 40+ provincial land and marine designations into a single unified *Designated Lands* dataset using ArcGIS Pro and arcpy, and then intersecting the result with ECCC's **Critical Habitat Area Final (CHA)** polygons to quantify how much critical habitat is already covered by existing protections, with the option to add a date filter to find if there are any new protections implemented in the within the last date range. Each designation is categorized by the level of restriction it imposes on three industry sectors — forestry, oil & gas, and mining — at five levels: **Protected**, **Full**, **High**, **Medium**, **Low**, and **None**.
 
 This is a re-implementation of the [original designatedlands tool](https://github.com/bcgov/designatedlands) (which used PostgreSQL/PostGIS), but extended in this script with CHA intersection, date-based change detection, and SARA reporting capabilities. This version replaces the database backend with Esri File Geodatabases and arcpy geoprocessing, making it runnable on any workstation with an ArcGIS Pro license. For more info on that dataset's methodology read [here](https://www.env.gov.bc.ca/soe/indicators/land/protected-lands-and-waters.html).
 
@@ -43,7 +43,7 @@ This ordering is maintained in `sources_designations.csv` and is the primary mec
 
 ### Restriction Classification
 
-Each designation carries an analyst-defined restriction rating for three resource industries: **forestry**, **oil & gas**, and **mining**. These ratings are based on the legislation, regulation, or management plan governing each designation and are expressed on a six-level ordinal scale:
+Each designation carries a restriction rating for three resource industries: **forestry**, **oil & gas**, and **mining**, expressed on a six-level ordinal scale:
 
 | Level | Integer code | Interpretation |
 |-------|--------------|----------------|
@@ -54,7 +54,25 @@ Each designation carries an analyst-defined restriction rating for three resourc
 | **Low** | 1 | Low restriction — activity is broadly permissible with standard regulatory requirements |
 | **None** | 0 | No restriction imposed by this designation |
 
-The restriction values are maintained as text labels in the source CSV and converted to integer codes at runtime. They are **not** derived from any external GIS layer or database — they represent an analytical judgment by the project team based on policy review.
+The restriction values are maintained as text labels in `sources_designations.csv` and converted to integer codes at runtime.
+
+#### Restriction Rating Methodology
+
+The restriction ratings are derived from the land designation framework established by Environmental Reporting BC, which categorizes provincial land designations into three tiers based on what each designation's underlying legislation, regulation, or management plan actually permits or prohibits:
+
+- **Protected Lands** — designations with the primary purpose of long-term conservation of nature and cultural values (e.g., Provincial Parks, Ecological Reserves, Conservancies)
+- **Resource Exclusion Areas** — designations that fully exclude one or two resource activities for the purpose of conservation (e.g., no-harvest Wildlife Habitat Areas, no-harvest Ungulate Winter Ranges)
+- **Spatially Managed Areas** — designations that manage or limit development or resource activity for conservation purposes, but where activity is still allowed to occur (e.g., conditional-harvest WHAs, Visual Quality Objectives, Old Growth Management Areas)
+
+The 0–5 per-industry restriction scale (forestry, oil & gas, and mining) was established in the original [`bcgov/designatedlands`](https://github.com/bcgov/designatedlands) Python tool, which underpins the Environmental Reporting BC land designations indicator. This pipeline carries those ratings forward unchanged. For example:
+
+- A **Provincial Park** receives Protected (5) for forestry, oil & gas, and mining because the *Park Act* prohibits industrial resource extraction across all sectors.
+- A **no-harvest Wildlife Habitat Area** receives Full (4) for forestry because the *Forest and Range Practices Act* prohibits harvest within the WHA boundary, Medium (2) for oil & gas, and no restriction for mining because the WHA designation imposes no constraint on mineral exploration or development.
+- A **conditional-harvest Ungulate Winter Range** receives Medium (2) for both forestry and oil & gas because activity is permitted under specified conditions rather than fully excluded, and no restriction for mining.
+
+The ratings represent a structured interpretation of each designation's legal framework. Users should consult the underlying legislation and management plans for site-specific regulatory decisions.
+
+> ¹ The original [`bcgov/designatedlands`](https://github.com/bcgov/designatedlands) Python script, including the restriction rating classifications and the `sources.csv` from which they are drawn, was created by Simon Norris at [Hillcrest Geo](https://hillcrestgeo.ca), Victoria, BC. See also the associated [Land Designations that Contribute to Conservation in B.C.](https://www.env.gov.bc.ca/soe/indicators/land/land-designations.html) indicator published by Environmental Reporting BC.
 
 ### Overlapping Output
 
@@ -62,7 +80,11 @@ The first analytical product, `designations_overlapping`, is produced by clippin
 
 ### Planarized Output
 
-The second analytical product, `designations_planarized`, resolves all overlaps to produce a **non-overlapping (planar)** layer. The method is:
+The second analytical product, `designations_planarized`, resolves all overlaps to produce a **non-overlapping (planar)** layer. 
+
+This planarized version is the only one of the two outputs that can give you a defensible non-overlapping protection percentage per CHA polygon.
+
+The method is:
 
 1. **Union**: All polygons from `designations_overlapping` are passed through an ArcGIS `Union` operation. This splits every polygon at every intersection boundary, creating planar topology. Where *n* designations overlap, the Union produces *n* rows sharing geometrically identical polygon fragments — each row carrying the attributes of one contributing designation.
 
@@ -75,7 +97,7 @@ The second analytical product, `designations_planarized`, resolves all overlaps 
 
 4. **Output generation**: The grouped results are written to the `designations_planarized` feature class using an `InsertCursor`, with a spatial index built for query performance.
 
-The planarized output guarantees that every point in BC falls within **at most one** designation polygon, making it suitable for area-based reporting, cartographic display, and industry-sector restriction mapping.
+The planarized output is non-overlapping — every point within a designated area is attributed to exactly one designation, making it suitable for area-based reporting, cartographic display, and industry-sector restriction mapping.
 
 ### Federal Exclusion
 
@@ -85,13 +107,13 @@ Three of the 42 designation layers originate from **federal** jurisdiction (Nati
 
 A date-filter mode (`--recent-only`) restricts the analysis to designations established or modified within a specified time window, directly supporting the 180-day SARA reporting cycle. Each source row in the CSV defines a `date_filter_query` template (e.g., `ESTABLISHMENT_DATE >= '{start_date}'`) that is injected into the WFS CQL filter at download time. Sources without a date-filterable attribute (noted as *"no date field available"* or *"non-BCGW source"*) are excluded from date-filtered runs. An xlsx report is generated summarising the changes, excluded layers, feature counts, and pipeline options used.
 
-When the date filter is active, all output feature class and table names are automatically suffixed with `_date_filter` (e.g., `designations_overlapping_date_filter`, `designations_planarized_date_filter`, `cha_overlap_summary_date_filter_03_20`) so that date-filtered outputs are immediately distinguishable from full-run outputs in the geodatabase.
+When the date filter is active, all output feature class and table names are automatically suffixed with `_date_filter` (e.g., `designations_overlapping_date_filter`, `designations_planarized_date_filter`, `cha_overlap_summary_date_filter_03_20`) so that date-filtered outputs are immediately distinguishable from full-run outputs in the geodatabase. 
 
 ### Limitations
 
-- **Restriction ratings are analyst-defined** — they represent informed professional judgment based on policy review, not a legally authoritative determination. Users should consult the underlying legislation and management plans for site-specific decisions.
+- **Restriction ratings are derived from the land designation framework established by Environmental Reporting BC** — they represent informed professional judgment based on policy review, not a legally authoritative determination. Users should consult the underlying legislation and management plans for site-specific decisions.
 - **Temporal snapshot** — the dataset reflects the state of BCGW data at the time of download. Designations may have been added, modified, or removed since the last run.
-- **Spatial precision** — the fragment-grouping method uses high-precision rounding (7 decimal places for centroid coordinates in BC Albers) to identify geometrically identical Union fragments. In extremely rare edge cases, two genuinely different polygons with nearly identical centroids, areas, and perimeters could theoretically be grouped together; however, this has not been observed in practice with the current source data.
+- **Spatial precision** — the fragment-grouping method uses a composite key of centroid coordinates (X and Y to 7 decimal places, ≈ 0.01 m precision in BC Albers), polygon area (2 decimal places), and polygon perimeter (2 decimal places) to identify geometrically identical Union fragments. In extremely rare edge cases, two genuinely different polygons with nearly identical centroids, areas, and perimeters could theoretically be grouped together; however, this has not been observed in practice with the current source data.
 - **Marine extent** — the analysis includes marine areas (marine ecosections and ABMS boundary) in the clipping boundary, so some designations may extend offshore. Users interested in terrestrial-only results should apply a post-processing clip to the land boundary.
 
 
@@ -116,6 +138,27 @@ All processing is performed in **NAD 1983 BC Environment Albers (EPSG:3005)**, t
 
 - **BC Geographic Warehouse (BCGW)**: Most designation layers are downloaded automatically via the province's public WFS endpoint (`https://openmaps.gov.bc.ca/geo/pub/wfs`). The pipeline resolves BC Data Catalogue URLs to WFS layer names and fetches GeoJSON features with optional CQL query filters.
 - **Manual downloads**: A few sources (e.g., private conservation lands) are not available via WFS. These are placed in the `source_data/` folder and referenced from the CSV.
+- **Critical Habitat Area**: The Critical Habitat Area dataset is sourced from ECCC's national Critical Habitat of Species at Risk in Canada data portal. The pipeline downloads CriticalHabitat.zip directly from the ECCC open data API at runtime and extracts CriticalHabitat.gdb into the source_data/ directory. If the download fails, the pipeline falls back to an existing local copy of CriticalHabitat.gdb in source_data/ if one is present — allowing the pipeline to proceed using a manually downloaded copy. If neither is available, the pipeline will raise an error with instructions to download the zip manually.
+Filtering
+The national CHA dataset covers all of Canada and all species. The pipeline applies a definition query to filter to the relevant subset before exporting to a local feature class. The default filter applied is:
+RD_Status IN (1) 
+And ProvTerr_E LIKE '%British Columbia%'
+And SciName NOT IN ('Taxidea taxus jeffersonii', 'Tyto alba', 'Pituophis catenifer deserticola',
+    'Melanerpes lewis', 'Brachyramphus marmoratus', 'Accipiter gentilis laingi',
+    'Chrysemys picta bellii', 'Sphyrapicus thyroideus', 'Rangifer tarandus',
+    'Myotis septentrionalis', 'Antrozous pallidus')
+And CommName_E NOT IN ('Woodland Caribou (Southern Mountain population)',
+    'Woodland Caribou (Boreal population)')
+This restricts the dataset to:
+
+FINAL status (RD_Status = 1) — only legally finalized critical habitat designations, excluding proposed or interim polygons
+British Columbia — features where the province/territory field includes British Columbia
+Remove Wide Ranging Species — a defined list of wide-ranging species is excluded by default, as their critical habitat extends well beyond BC or overlaps complex jurisdictional boundaries that fall outside the scope of this analysis
+
+The species exclusion list is controlled by the CHA_FILTER_OUT_WRS flag in main.py. When set to True, the full filter above is applied. When set to False, only the FINAL status and BC filters are applied and all species are included — useful for testing or when a full species coverage run is required.
+
+**Output**
+The filtered features are exported from the national GDB to a new local feature class at source_data/critical_habitat_area.gdb/critical_habitat_area using FeatureClassToFeatureClass. ArcGIS reassigns OBJECTIDs sequentially when writing to a new feature class, so the FID_critical_habitat_area values that appear in the intersection outputs are local IDs that refer back to this filtered copy — they do not correspond to OBJECTIDs in the original ECCC national dataset. See the Backtracing to the CHA Polygon section for details.
 
 ### Federal exclusion
 
@@ -131,7 +174,7 @@ By default these are **excluded** (`--exclude-federal`, enabled by default) beca
 
 ### Restriction levels
 
-Each designation carries restriction ratings for three resource industries (`forest_restriction`, `og_restriction`, `mine_restriction`). These values are **analyst-defined classifications** maintained as text labels in `sources_designations.csv` — each of the 42 source rows specifies a restriction level for forestry, oil & gas, and mining based on the policy or legislation governing that designation. At runtime, `designatedlands.py` converts the text labels to integer codes using a lookup dictionary defined in the `DesignatedLands.__init__()` constructor:
+Each designation carries restriction ratings for three resource industries (`forest_restriction`, `og_restriction`, `mine_restriction`). These values are **defined by the original land designations script maintained by ERBC** and  maintained as text labels in `sources_designations.csv` — each of the 42 source rows specifies a restriction level for forestry, oil & gas, and mining based on the policy or legislation governing that designation. At runtime, `designatedlands.py` converts the text labels to integer codes using a lookup dictionary defined in the `DesignatedLands.__init__()` constructor:
 
 | Level | Code | Meaning |
 |-------|------|---------|
@@ -231,11 +274,11 @@ Takes `designations_overlapping` and produces a non-overlapping output:
    - All contributing designation names are collected into a semicolon-delimited `overlapping_designations` field.
 3. Populates the output using `InsertCursor`, writing each unique planar polygon with its aggregated attributes. Each Union fragment retains its original geometry — polygons are not geometrically merged.
 
-The result: every point in BC falls within at most one designation polygon, assigned to the highest-priority overlapping designation.
+The result: The planarized output is non-overlapping — every point within a designated area is attributed to exactly one designation, making it suitable for area-based reporting, cartographic display, and industry-sector restriction mapping.
 
 ### Step 5 — Process Raster (Optional)
 
-Requires the **Spatial Analyst** extension (not available with ArcGIS Pro Basic). Disabled by default (`--raster` to enable).
+Requires the **Spatial Analyst** extension (not available with ArcGIS Pro Basic). Disabled by default (`--raster` to enable) and was not run in the 03_2026 edition of this script
 
 - **Rasterize**: Converts each designation source to a GeoTIFF at the configured resolution (default 100m) using `arcpy.conversion.PolygonToRaster`.
 - **Overlay**: Uses NumPy array operations to combine all rasters into four outputs:
@@ -250,8 +293,9 @@ Exports `designations_overlapping` and `designations_planarized` from the workin
 
 ### Step 7 — Cleanup
 
-Deletes all intermediate feature classes (`src_*` and `*_pp`) from the working GDB to reclaim disk space. The output GDB in `outputs/` is not affected. Use `--skip-cleanup` to keep intermediate data for debugging.
-
+Deletes all intermediate feature classes (`src_*` and `*_pp`) from the working GDB to
+reclaim disk space. The output GDB in `outputs/` is not affected.
+Set `SKIP_CLEANUP = True` in `main.py` to retain intermediate data for debugging.
 
 ---
 
@@ -342,13 +386,42 @@ python main.py --verbose
 | `--end-date` | today | End of date filter window |
 | `--exclude-federal` / `--no-exclude-federal` | on | Exclude/include federal designations |
 
-The following option is set directly in `main.py` (not as a CLI flag):
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CHA_FILTER_OUT_WRS` | `True` | `True` = full CHA filter (FINAL + BC + exclude specified wide ranging species). `False` = minimal CHA filter (FINAL + BC only, all species included). |
 
-### Subcommand interface
+## Pipeline Options
+
+If you prefer, the top of `main.py` contains a block of hardcoded options that control the behaviour
+of the entire pipeline. Edit these directly before running — no command-line flags are
+needed.
+
+```python
+# =================================================================
+# PIPELINE OPTIONS  —  Edit these directly, then hit Run in VS Code
+# =================================================================
+RECENT_ONLY        = True           # True = only process features new/modified in date window
+START_DATE         = "2025-04-01"   # Start of date window (YYYY-MM-DD)
+END_DATE           = None           # End of date window (None = today)
+EXCLUDE_FEDERAL    = True           # Exclude National Parks, NWAs, Migratory Bird Sanctuaries
+SKIP_DOWNLOAD      = False          # True = skip WFS download (use existing data in GDB)
+SKIP_CLEANUP       = False          # True = keep intermediate feature classes
+RASTER             = False          # True = create raster outputs (requires Spatial Analyst)
+CHA_FILTER_OUT_WRS = False          # True = full CHA filter (FINAL + BC + exclude species)
+                                    # False = minimal CHA filter (FINAL + BC only)
+# =================================================================
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `RECENT_ONLY` | bool | `True` | When `True`, restricts the analysis to designation features that were established or modified within the date window defined by `START_DATE` and `END_DATE`. Each source in `sources_designations.csv` must have a `date_filter_query` entry for its features to be included in a date-filtered run — sources without a date-filterable field are excluded. All output names are suffixed with `_date_filter`. When `False`, the full dataset is downloaded with no date restriction. |
+| `START_DATE` | str | `"2025-04-01"` | The start of the date filter window, in `YYYY-MM-DD` format. Only used when `RECENT_ONLY = True`. Set this to the end date of the previous SARA 180-day report to capture all changes since the last submission. |
+| `END_DATE` | str or None | `None` | The end of the date filter window, in `YYYY-MM-DD` format. When set to `None`, defaults to today's date at runtime. Only used when `RECENT_ONLY = True`. |
+| `EXCLUDE_FEDERAL` | bool | `True` | When `True`, omits the three federal designation layers — National Parks (process_order 1), National Wildlife Areas (process_order 10), and Migratory Bird Sanctuaries (process_order 12) — from all pipeline steps. These layers originate from federal repositories with different update cycles and are excluded by default because the analysis focuses on provincially-managed lands. Set to `False` to include federal designations. |
+| `SKIP_DOWNLOAD` | bool | `False` | When `True`, skips the WFS download step entirely and uses whatever `src_*` feature classes are already present in the working GDB (`designatedlands.gdb`). Useful when re-running processing steps after a completed download, or when testing changes to the vector processing logic without waiting for a fresh download. |
+| `SKIP_CLEANUP` | bool | `False` | When `True`, retains all intermediate feature classes (`src_*` raw downloads and `*_pp` preprocessed versions) in the working GDB after the pipeline completes. Useful for inspecting intermediate outputs or debugging a processing issue. When `False`, these are deleted at Step 7 to reclaim disk space. |
+| `RASTER` | bool | `False` | When `True`, runs the optional raster processing step (Step 5) after the vector outputs are complete. This converts designation polygons to four GeoTIFFs: `designatedlands.tif`, `forest_restriction.tif`, `og_restriction.tif`, and `mine_restriction.tif`. **Requires the ArcGIS Spatial Analyst extension** — the pipeline will fail at this step without it. Leave `False` if you only need vector outputs or do not have Spatial Analyst licensed. |
+| `CHA_FILTER_OUT_WRS` | bool | `False` | Controls how broadly the Critical Habitat Area (CHA) dataset is filtered when downloaded from ECCC. When `True`, applies the full filter: FINAL status + British Columbia + excludes a defined list of wide-ranging species (e.g., Woodland Caribou, Grizzly Bear) whose critical habitat extends well beyond BC or overlaps complex jurisdictional boundaries. When `False`, applies only the FINAL status and BC filters — all species are included. Use `False` for standard SARA reporting runs; use `True` only when the wide-ranging species exclusions are appropriate for your analytical scope. |
+
+### Subcommand interface (Untested)
 
 `designatedlands.py` also exposes individual pipeline steps as subcommands for advanced use:
 
@@ -468,7 +541,7 @@ Key responsibilities:
 - Prints a configuration banner showing active flags
 - Calls `DesignatedLands()` constructor (loads CSVs, applies filters, sets up GDB)
 - Wraps each step in `run_step()` which captures arcpy messages and logs failures
-- Generates an xlsx report when federal exclusion or date filtering is active
+- Generates an xlsx report on every run, summarising changes, excluded layers, feature counts, pipeline options, and designation categories
 - Controls optional steps (raster, cleanup) via CLI flags
 - Controls the CHA definition query scope via `CHA_FILTER_OUT_WRS` — when `False`, overrides the CSV query to include all species (FINAL + BC only)
 
@@ -573,6 +646,8 @@ The `dump` step writes two feature classes to `outputs/designatedlands_output.gd
 
 ### `designations_overlapping`
 
+- This is intermediate data and is basically Land Designations but slightly filtered (ie. possible date filter)
+
 Each individual designation polygon, clipped to land boundary, with full attribution. Overlaps are preserved.
 
 | Field | Description |
@@ -584,14 +659,18 @@ Each individual designation polygon, clipped to land boundary, with full attribu
 | `forest_restriction` | Forestry restriction level (0–5) |
 | `og_restriction` | Oil & gas restriction level (0–5) |
 | `mine_restriction` | Mining restriction level (0–5) |
-
+| `Total_Area_ha` | Area of polygon in hectares|
 ### `designations_planarized`
+
+- Intermediate data similar to Land Designation Dataset
+- source_id and source_name will be blank (*Possible future improvement to populate these)
 
 Non-overlapping output. Where designations overlap, the polygon is assigned to the highest-priority designation. Restriction fields hold the maximum value across all overlapping designations. All contributing designation names are listed in `overlapping_designations`.
 
 | Field | Description |
 |-------|-------------|
-| `designation` | Highest-priority designation code (lowest `process_order`) |
+| `process_order` | Priority rank from CSV |
+| `designation` | Highest-priority designation code on 1 - 42 scale from .csv file (lowest `process_order`) |
 | `overlapping_designations` | Semicolon-delimited list of all designation codes that overlap this polygon (e.g., `vqo_retain; fsw`), sorted by priority |
 | `forest_restriction_max` | Maximum forest restriction across overlapping designations |
 | `og_restriction_max` | Maximum oil & gas restriction |
@@ -612,9 +691,9 @@ Built by intersecting `designations_overlapping` with the CHA feature class, the
 
 | Field | Description |
 |-------|-------------|
-| `designation` | The designation code (e.g., `park_provincial`, `ogma_legal`) |
+| `designation` | The designation code, one row per designation type (e.g., `park_provincial`, `ogma_legal`) |
 | `FREQUENCY` | The number of intersect fragments that were aggregated into this designation's summary row (auto-generated by `arcpy.analysis.Statistics`). |
-| `SUM_Overlap_Area_ha` | Total area (hectares) of this designation that falls inside CHA polygons. Computed by running geodesic area calculation on the intersect result (overlapping designations clipped to CHA), then summing by designation. |
+| `SUM_Overlap_Area_ha` | Total area (hectares) of this designation that falls inside any CHA polygons. Computed by running geodesic area calculation on the intersect result (overlapping designations clipped to CHA), then summing by designation. |
 | `SUM_Total_Area_ha` | Total area (hectares) of this designation overall (before intersection with CHA). Computed from the original `designations_overlapping` layer and joined in. |
 | `CHA_Percent` | The percentage of the designation's total area that overlaps with CHA. |
 
@@ -626,13 +705,13 @@ $$\text{CHA\_Percent} = \frac{\text{SUM\_Overlap\_Area\_ha}}{\text{SUM\_Total\_A
 
 ### `cha_protection_summary`
 
-A **per-CHA-polygon** summary table that answers: *"What percentage of each individual CHA polygon is covered by overlapping designations?"*
+A **per-CHA-polygon** summary table created by designations planarized that answers: *"What percentage of each individual CHA polygon is covered by overlapping designations?"*
 
 Built by grouping the intersect result by `FID_critical_habitat_area` (the CHA polygon ID carried through from the intersection), then summing the overlap area and comparing it to the original CHA polygon area. The key fields are:
 
 | Field | Description |
 |-------|-------------|
-| `FID_critical_habitat_area` | The unique identifier for each CHA polygon. This field is auto-generated by `arcpy.analysis.PairwiseIntersect` — it carries the original `OBJECTID` of the CHA polygon from the `critical_habitat_area` feature class into the intersect output, allowing each fragment to be traced back to its parent CHA polygon. |
+| `FID_critical_habitat_area` | The unique identifier for each CHA polygon. This field is auto-generated by `arcpy.analysis.PairwiseIntersect` — it carries the original `OBJECTID` of the CHA polygon from the `critical_habitat_area` feature class into the intersect output, allowing each fragment to be traced back to its parent CHA polygon **of the exported CHA dataset**. |
 | `FREQUENCY` | The number of intersect fragments that were aggregated into this CHA polygon's summary row (auto-generated by `arcpy.analysis.Statistics`). |
 | `SUM_Overlap_Area_ha` | Total area (hectares) of all designation overlaps within this CHA polygon |
 | `FIRST_Area_ha` | The original area (hectares) of this CHA polygon (from the `Area_ha` field in the CHA source) |
@@ -652,7 +731,7 @@ $$\text{CHA\_Protected\_Pct} = \frac{\text{Overlap\_Area\_ha}}{\text{Area\_ha}} 
 
 ### How CHA polygons are fragmented
 
-The original CHA polygons enter the pipeline as whole, unfragmented geometries from ECCC's national dataset. During the `PairwiseIntersect` step in `intersect_area_calc.py`, each CHA polygon is split into smaller fragments wherever it crosses a designation polygon boundary. For example:
+The original CHA polygons enter the pipeline as whole, unfragmented geometries from ECCC's national dataset. During the `PairwiseIntersect` step in `intersect_area_calc.py`, each CHA polygon is split into smaller fragments wherever it crosses a designation polygon boundary. For example in the **Planarized output**:
 
 - **Input**: 1 CHA polygon (500 ha) overlapping 3 designation areas (provincial park, OGMA, wildlife habitat area).
 - **After PairwiseIntersect**: 3 fragment rows (e.g., 180 ha + 220 ha + 100 ha = 500 ha total). Each fragment inherits:
@@ -663,6 +742,22 @@ The original CHA polygons enter the pipeline as whole, unfragmented geometries f
 - **Per-fragment percentage**: `CHA_Protected_Pct = Overlap_Area_ha / Area_ha × 100` (e.g., 180 / 500 = 36%).
 
 The summary tables then **re-aggregate** fragments back to the original CHA polygon level using `FID_critical_habitat_area` as the grouping key. `FIRST(Area_ha)` recovers the original polygon area (since all fragments carry the same value), and `SUM(Overlap_Area_ha)` totals the fragments to compute `Total_CHA_Protected_Pct`.
+
+### Backtracing to the CHA Polygon
+
+`FID_critical_habitat_area` values **do not match OBJECTIDs in the original ECCC national dataset**. For example, a row with `FID_critical_habitat_area = 1276` will not correspond to OBJECTID 1276 in the source `CriticalHabitat.gdb` — instead, that same polygon may carry OBJECTID 22943 there.
+
+This happens because of how the pipeline prepares the CHA data in `create_cha.py`:
+
+1. The full national `CriticalHabitat.gdb` is downloaded from ECCC (covering all of Canada).
+2. A definition query is applied to filter to FINAL status, British Columbia, and the configured species list.
+3. The filtered subset is exported to a **new** feature class (`source_data/critical_habitat_area.gdb/critical_habitat_area`) via `FeatureClassToFeatureClass`.
+
+ArcGIS never preserves OBJECTIDs when writing to a new feature class — it reassigns them sequentially starting at 1. The polygon that was OBJECTID 22943 in the national dataset becomes OBJECTID 1276 in the local filtered copy simply because it is the 1276th feature written.
+
+`PairwiseIntersect` then records `FID_critical_habitat_area = 1276` from that local copy. **`FID_critical_habitat_area` is only a valid join key back to `source_data/critical_habitat_area.gdb/critical_habitat_area` — it cannot be used to look up polygons in the original ECCC download or any other copy of the CHA dataset, but can be backtracked to the pipeline exported dataset (possible future improvement is to make it backtrack to the ECCC dataset).**
+
+
 
 ### Example output contents (verified run: 2026-03-24)
 
