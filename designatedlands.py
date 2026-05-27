@@ -28,6 +28,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import tarfile
@@ -309,14 +310,21 @@ def download_file(url: str, path: str, filename: str, overwrite: bool = False):
     """
     Download a zip/tar archive from *url* and extract it.
     Returns: (local_file_path, extracted_folder)
-    The extract folder is named by a hash of the URL so the same URL is only
-    downloaded once.
+    The extract folder uses a short readable source name plus a short URL hash
+    so cached downloads remain unique but easier to inspect.
     """
-    out_folder = os.path.join(path, hashlib.sha224(url.encode("utf-8")).hexdigest())
+    out_folder, legacy_out_folder = build_download_cache_paths(path, url, filename)
     out_file = os.path.join(out_folder, filename)
 
-    if overwrite and os.path.exists(out_folder):
-        shutil.rmtree(out_folder)
+    if overwrite:
+        for folder in {out_folder, legacy_out_folder}:
+            if os.path.exists(folder):
+                shutil.rmtree(folder)
+
+    if not os.path.exists(out_folder) and os.path.exists(legacy_out_folder):
+        LOG.info("Using legacy cache folder %s", legacy_out_folder)
+        out_folder = legacy_out_folder
+        out_file = os.path.join(out_folder, filename)
 
     if not os.path.exists(out_folder):
         LOG.info("Downloading %s", url)
@@ -348,7 +356,101 @@ def download_file(url: str, path: str, filename: str, overwrite: bool = False):
         archive.close()
         os.unlink(fp.name)
 
-    return out_file, out_folder
+    resolved_file = resolve_extracted_path(out_folder, filename)
+    if resolved_file != out_file:
+        LOG.info(
+            "Resolved extracted dataset path %s -> %s",
+            out_file,
+            resolved_file,
+        )
+
+    return resolved_file, out_folder
+
+
+def build_download_cache_paths(base_path: str, url: str, filename: str):
+    """Return the preferred and legacy cache folder paths for a download."""
+    full_hash = hashlib.sha224(url.encode("utf-8")).hexdigest()
+    short_hash = full_hash[:8]
+
+    display_name = build_download_cache_name(filename or urlparse(url).path)
+    preferred_folder = os.path.join(base_path, f"{display_name}_{short_hash}")
+    legacy_folder = os.path.join(base_path, full_hash)
+    return preferred_folder, legacy_folder
+
+
+def build_download_cache_name(name: str, max_length: int = 24) -> str:
+    """Create a short filesystem-friendly cache folder prefix."""
+    candidate = os.path.basename(os.path.normpath(name or "download"))
+    stem, ext = os.path.splitext(candidate)
+    if ext.lower() in {".zip", ".gz", ".bz2", ".tar", ".tgz", ".tbz2"}:
+        candidate = stem or candidate
+        stem, _ = os.path.splitext(candidate)
+
+    safe_name = re.sub(r"[^A-Za-z0-9]+", "_", stem or candidate)
+    safe_name = safe_name.strip("_") or "download"
+    return safe_name[:max_length].rstrip("_") or "download"
+
+
+def resolve_extracted_path(extract_root: str, expected_path: str) -> str:
+    """
+    Resolve the extracted dataset path inside an archive output folder.
+
+    Some archives unpack their contents into an extra top-level folder
+    (for example `CriticalHabitat/CriticalHabitat.gdb`) rather than placing
+    the expected dataset directly under `extract_root`.
+    """
+    direct_path = os.path.join(extract_root, expected_path)
+    if os.path.exists(direct_path):
+        return direct_path
+
+    if not expected_path:
+        return direct_path
+
+    normalized_expected = os.path.normpath(expected_path)
+    expected_parts = normalized_expected.split(os.sep)
+    target_name = expected_parts[-1].lower()
+    suffix = os.path.join(*expected_parts).lower()
+    matches = []
+
+    for root, dirs, files in os.walk(extract_root):
+        for name in dirs + files:
+            if name.lower() != target_name:
+                continue
+            candidate = os.path.join(root, name)
+            relative_candidate = os.path.normpath(
+                os.path.relpath(candidate, extract_root)
+            )
+            rel_lower = relative_candidate.lower()
+            score = 2
+            if rel_lower == suffix:
+                score = 0
+            elif rel_lower.endswith(suffix):
+                score = 1
+            matches.append((score, len(relative_candidate), candidate))
+
+    if matches:
+        matches.sort()
+        return matches[0][2]
+
+    return direct_path
+
+
+def resolve_layer_path(src_file: str, layer: str) -> str:
+    """Resolve a layer path within a source dataset or workspace."""
+    if not layer:
+        return src_file
+
+    direct_path = os.path.join(src_file, layer) if not os.path.isfile(src_file) else src_file
+    if arcpy.Exists(direct_path):
+        return direct_path
+
+    layer_name = os.path.basename(os.path.normpath(layer)).lower()
+    for walk_root, _, feature_classes in arcpy.da.Walk(src_file, datatype="FeatureClass"):
+        for feature_class in feature_classes:
+            if feature_class.lower() == layer_name:
+                return os.path.join(walk_root, feature_class)
+
+    return direct_path
 
 
 def resolve_catalogue_to_wfs_layer(slug: str) -> str:
@@ -518,10 +620,7 @@ def load_file_to_gdb(
     if arcpy.Exists(temp_lyr):
         arcpy.management.Delete(temp_lyr)
 
-    if layer:
-        src = os.path.join(src_file, layer) if not os.path.isfile(src_file) else src_file
-    else:
-        src = src_file
+    src = resolve_layer_path(src_file, layer)
 
     arcpy.management.MakeFeatureLayer(src, temp_lyr, sql_where or "")
     arcpy.conversion.FeatureClassToFeatureClass(temp_lyr, gdb, fc_name)
