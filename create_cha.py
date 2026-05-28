@@ -11,6 +11,14 @@ Download behaviour:
         (no hash folders).
     - If the download fails, falls back to an existing
         source_data/CriticalHabitat.gdb if one is present.
+    - If neither succeeds, raises an error with manual download instructions.
+
+Manual download fallback (e.g. if behind a firewall):
+    1. Download CriticalHabitat.zip from the URL in sources_supporting.csv
+       (or directly from https://data-donnees.az.ec.gc.ca)
+    2. Extract CriticalHabitat.gdb from the zip
+    3. Place CriticalHabitat.gdb inside the source_data/ directory
+    4. Re-run — the script will detect and use the local copy
 
 Can be run standalone or called from the pipeline via prepare_cha().
 
@@ -129,12 +137,12 @@ def _download_cha_zip(url, dest_dir, max_retries=3, timeout=60):
 
             print(f"[CHA] Download complete. Extracting...")
 
-            # Remove old GDB if it exists
-            if os.path.exists(src_gdb_path):
-                print(f"[CHA] Removing old {CHA_GDB_NAME}...")
-                shutil.rmtree(src_gdb_path)
-
-            # Extract the zip
+            # Extract the zip directly into dest_dir. We intentionally do NOT
+            # delete the old GDB first — it may be locked by ArcGIS Pro while
+            # the pipeline is running, and shutil.rmtree would fail with
+            # WinError 5 (Access Denied), discarding a successful download.
+            # zipfile.ZipFile.extractall() overwrites individual files in place,
+            # which works fine even when the GDB folder already exists.
             print(f"[CHA] Extracting {CHA_GDB_NAME} into {dest_dir}...")
             with zipfile.ZipFile(temp_zip_path, "r") as zf:
                 zf.extractall(dest_dir)
@@ -230,26 +238,43 @@ def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None,
     else:
         raise RuntimeError(
             f"Download failed and no existing {CHA_GDB_NAME} found in "
-            f"{source_data_dir}. Download the zip manually, unzip "
-            f"{CHA_GDB_NAME} into {source_data_dir}, and re-run."
+            f"{source_data_dir}.\n\n"
+            f"To proceed manually:\n"
+            f"  1. Download the zip from:\n"
+            f"     {cfg['url']}\n"
+            f"  2. Extract {CHA_GDB_NAME} from the zip\n"
+            f"  3. Place {CHA_GDB_NAME} into the source_data/ folder\n"
+            f"     in the same directory as this script\n"
+            f"  4. Re-run the script"
         )
 
     print(f"[CHA] Using source GDB: {src_gdb}")
 
     # Determine layer name
     layer = cfg["layer_in_file"] or None
-    if layer:
+    prev_ws = arcpy.env.workspace
+    arcpy.env.workspace = src_gdb
+    available_fcs = [fc.lower() for fc in (arcpy.ListFeatureClasses() or [])]
+    arcpy.env.workspace = prev_ws
+
+    if layer and layer.lower() in available_fcs:
+        # Configured layer name exists — use it
         src = os.path.join(src_gdb, layer)
     else:
-        # Auto-detect first feature class
-        prev_ws = arcpy.env.workspace
-        arcpy.env.workspace = src_gdb
-        fcs = arcpy.ListFeatureClasses() or []
-        arcpy.env.workspace = prev_ws
-        if not fcs:
+        if layer:
+            # Configured layer name not found — warn and auto-detect
+            print(f"[CHA] WARNING: Configured layer '{layer}' not found in "
+                  f"{src_gdb}. Available: {available_fcs}. Auto-detecting...")
+            LOG.warning("Configured layer_in_file '%s' not found in %s; "
+                        "available: %s", layer, src_gdb, available_fcs)
+        if not available_fcs:
             raise ValueError(f"No feature classes found in {src_gdb}")
-        src = os.path.join(src_gdb, fcs[0])
-        layer = fcs[0]
+        # Use the first feature class found
+        arcpy.env.workspace = src_gdb
+        first_fc = (arcpy.ListFeatureClasses() or [])[0]
+        arcpy.env.workspace = prev_ws
+        src = os.path.join(src_gdb, first_fc)
+        layer = first_fc
         print(f"[CHA] Auto-detected layer: {layer}")
 
     # Create or recreate output GDB
