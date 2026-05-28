@@ -3,7 +3,7 @@
 
 # Designated Lands — ArcGIS Pro Edition
 
-Under section 63 of the *Species at Risk Act* (SARA), the Government of British Columbia must report every 180 days on the protection of Critical Habitat for listed species on non-federal lands. This pipeline supports that obligation for British Columbia by consolidating 40+ provincial land and marine designations into a single unified *Designated Lands* dataset using ArcGIS Pro and arcpy, and then intersecting the result with ECCC's **Critical Habitat Area Final (CHA)** polygons to quantify how much critical habitat is already covered by existing protections, with the option to add a date filter to find if there are any new protections implemented in the within the last date range. Each designation is categorized by the level of restriction it imposes on three industry sectors — forestry, oil & gas, and mining — at five levels: **Protected**, **Full**, **High**, **Medium**, **Low**, and **None**.
+Under section 63 of the *Species at Risk Act* (SARA), the Government of British Columbia must report every 180 days on the protection of Critical Habitat for listed species on non-federal lands. This pipeline supports that obligation for British Columbia by consolidating 40+ provincial land and marine designations into a single unified *Designated Lands* dataset using ArcGIS Pro and arcpy, and then intersecting the result with ECCC's **Critical Habitat Area Final (CHA)** polygons to quantify how much critical habitat is already covered by existing protections, with the option to add a date filter to find if there are any new protections implemented in the within the last date range. Each designation is categorized by the level of restriction it imposes on three industry sectors — forestry, oil & gas, and mining — at six levels: **Protected**, **Full**, **High**, **Medium**, **Low**, and **None**.
 
 This is a re-implementation of the [original designatedlands tool](https://github.com/bcgov/designatedlands) (which used PostgreSQL/PostGIS), but extended in this script with CHA intersection, date-based change detection, and SARA reporting capabilities. This version replaces the database backend with Esri File Geodatabases and arcpy geoprocessing, making it runnable on any workstation with an ArcGIS Pro license. For more info on that dataset's methodology read [here](https://www.env.gov.bc.ca/soe/indicators/land/protected-lands-and-waters.html).
 
@@ -76,7 +76,7 @@ The ratings represent a structured interpretation of each designation's legal fr
 
 ### Overlapping Output
 
-The first analytical product, `designations_overlapping`, is produced by clipping each of the 42 designation layers to British Columbia's terrestrial and marine boundary and inserting them into a single feature class. Overlaps between different designations are **preserved** — a single geographic area may carry attributes from multiple designation polygons stacked on top of each other. This output is suitable for queries such as *"list all designations that apply to this parcel."*
+The first analytical product, `designations_overlapping`, is produced by clipping each of the 42 designation layers to British Columbia's terrestrial boundary (`bc_boundary_land`) and inserting them into a single feature class. Overlaps between different designations are **preserved** — a single geographic area may carry attributes from multiple designation polygons stacked on top of each other. This output is suitable for queries such as *"list all designations that apply to this parcel."*
 
 ### Planarized Output
 
@@ -101,11 +101,11 @@ The planarized output is non-overlapping — every point within a designated are
 
 ### Federal Exclusion
 
-Three of the 42 designation layers originate from **federal** jurisdiction (National Parks, National Wildlife Areas, Migratory Bird Sanctuaries). Because this analysis focuses on **provincially-managed** lands and the federal sources are drawn from a separate data repository with different update cycles, these layers are excluded by default. The `jurisdiction` column in the source CSV identifies federal sources, and the `--exclude-federal` / `--no-exclude-federal` flag controls their inclusion at runtime, alternatively default settings can be hardcoded at the top of main.py. Excluding federal sources does not affect the process_order numbering of remaining layers — the original ordinal values are preserved to maintain consistency across runs.
+Three of the 42 designation layers originate from **federal** jurisdiction (National Parks, National Wildlife Areas, Migratory Bird Sanctuaries). Because this analysis focuses on **provincially-managed** lands and the federal sources are drawn from a separate data repository with different update cycles, these layers are excluded by default. The `jurisdiction` column in the source CSV identifies federal sources, and the `EXCLUDE_FEDERAL` pipeline option in `main.py` controls their inclusion at runtime. Excluding federal sources does not affect the process_order numbering of remaining layers — the original ordinal values are preserved to maintain consistency across runs.
 
 ### Date-Based Change Detection
 
-A date-filter mode (`--recent-only`) restricts the analysis to designations established or modified within a specified time window, directly supporting the 180-day SARA reporting cycle. Each source row in the CSV defines a `date_filter_query` template (e.g., `ESTABLISHMENT_DATE >= '{start_date}'`) that is injected into the WFS CQL filter at download time. Sources without a date-filterable attribute (noted as *"no date field available"* or *"non-BCGW source"*) are excluded from date-filtered runs. An xlsx report is generated summarising the changes, excluded layers, feature counts, and pipeline options used.
+A date-filter mode (`RECENT_ONLY = True`) restricts the analysis to designations established or modified within a specified time window, directly supporting the 180-day SARA reporting cycle. Each source row in the CSV defines a `date_filter_query` template (e.g., `ESTABLISHMENT_DATE >= '{start_date}'`) that is injected into the WFS CQL filter at download time. Sources without a date-filterable attribute (noted as *"no date field available"* or *"non-BCGW source"*) are excluded from date-filtered runs. The date window is set using `START_DATE` and `END_DATE` in `main.py`. An xlsx report is generated summarising the changes, excluded layers, feature counts, and pipeline options used.
 
 When the date filter is active, output feature class names are automatically suffixed with `_date_filter` (e.g., `designations_overlapping_date_filter`, `designations_planarized_date_filter`, `designations_planarized_date_filter_cha_03_20`) so that date-filtered outputs are immediately distinguishable from full-run outputs in the geodatabase. 
 
@@ -128,7 +128,7 @@ The pipeline combines roughly 40 provincial designation layers (parks, conservan
 | Output | Description |
 |--------|-------------|
 | **designations_overlapping** | Every designation polygon clipped to BC's terrestrial boundary and stacked. Polygons from different sources can overlap — a single geographic area may carry attributes from multiple designations. |
-| **designations_planarized** | A non-overlapping (planar) layer derived from the overlapping output. Where designations overlap, the polygon is assigned to the designation with the **lowest `process_order`** (highest priority). Adjacent polygons of the same designation are dissolved together. |
+| **designations_planarized** | A non-overlapping (planar) layer derived from the overlapping output. Where designations overlap, the polygon is assigned to the designation with the **lowest `process_order`** (highest priority). Union fragments are grouped for attribute resolution, and geometry is carried through unchanged. |
 
 ### Coordinate system
 
@@ -170,7 +170,7 @@ Three designation layers originate from federal jurisdiction:
 | 10 | National Wildlife Areas |
 | 12 | Migratory Bird Sanctuaries |
 
-By default these are **excluded** (`--exclude-federal`, enabled by default) because this analysis focuses on provincially-managed lands. Use `--no-exclude-federal` to include them.
+By default these are **excluded** (`EXCLUDE_FEDERAL = True`) because this analysis focuses on provincially-managed lands. Set `EXCLUDE_FEDERAL = False` to include them.
 
 ### Restriction levels
 
@@ -207,7 +207,7 @@ The pipeline runs seven sequential steps. Each step builds on the outputs of the
 │                       merge land + marine → bc_boundary            │
 ├─────────────────────────────────────────────────────────────────────┤
 │  4. PROCESS VECTOR    4a. designations_overlapping (clip & stack)  │
-│                       4b. designations_planarized  (Union→Dissolve)│
+│                       4b. designations_planarized  (Union→Grouping)│
 ├─────────────────────────────────────────────────────────────────────┤
 │  5. PROCESS RASTER    (Optional) PolygonToRaster → overlay TIFs   │
 ├─────────────────────────────────────────────────────────────────────┤
@@ -256,7 +256,7 @@ The merged boundary is dissolved into a single polygon representing BC's full la
 Creates an empty feature class with fields: `process_order`, `designation`, `source_id`, `source_name`, `forest_restriction`, `og_restriction`, `mine_restriction`. Then iterates each source in `process_order`:
 
 1. Selects the preprocessed FC (if available) or the raw source FC.
-2. **Clips** it to `bc_boundary` (land boundary) using `arcpy.analysis.Clip`.
+2. **Clips** it to `bc_boundary_land` (land boundary) using `arcpy.analysis.Clip`.
 3. Opens a `SearchCursor` on the clipped result and an `InsertCursor` on the output.
 4. For each feature, inserts a row with the designation attributes and restriction levels looked up from the CSV configuration.
 
@@ -268,7 +268,7 @@ Takes `designations_overlapping` and produces a non-overlapping output:
 
 
 1. **Union** (`arcpy.analysis.Union`): Splits all polygons at every intersection boundary, creating planar topology. Every resulting polygon fragment knows which original designations it belonged to.
-2. **Python-based spatial grouping** similar to "disolve": Fragments are grouped by a composite key of centroid coordinates, area, and perimeter (not an `arcpy.management.Dissolve` call). For each group of spatially identical fragments:
+2. **Python-based spatial grouping**: Fragments are grouped by a composite key of centroid coordinates, area, and perimeter. For each group of spatially identical fragments:
    - The designation with the **lowest `process_order`** (highest priority) is assigned.
    - `forest_restriction_max`, `og_restriction_max`, and `mine_restriction_max` are set to the MAX across all contributing designations, ensuring the most restrictive level is reported for each sector.
    - All contributing designation names are collected into a semicolon-delimited `overlapping_designations` field.
@@ -278,11 +278,11 @@ The result: The planarized output is non-overlapping — every point within a de
 
 ### Step 5 — Process Raster (Optional)
 
-Requires the **Spatial Analyst** extension (not available with ArcGIS Pro Basic). Disabled by default (`--raster` to enable) and was not run in the 03_2026 edition of this script
+Requires the **Spatial Analyst** extension (not available with ArcGIS Pro Basic). Disabled by default (`RASTER = False`) and was not run in the 03_2026 edition of this script.
 
 - **Rasterize**: Converts each designation source to a GeoTIFF at the configured resolution (default 100m) using `arcpy.conversion.PolygonToRaster`.
 - **Overlay**: Uses NumPy array operations to combine all rasters into four outputs:
-  - `designatedlands.tif` — designation codes (highest process_order wins)
+  - `designatedlands.tif` — designation codes (lowest process_order wins; highest priority)
   - `forest_restriction.tif` — forest restriction levels
   - `og_restriction.tif` — oil & gas restriction levels
   - `mine_restriction.tif` — mine restriction levels
@@ -342,34 +342,24 @@ python main.py
 
 This will:
 - Exclude federal layers (National Parks, NWA, MBS)
-- Apply the full CHA definition query (FINAL + BC + species exclusions)
+- Apply the minimal CHA definition query (FINAL + BC only; all species included)
 - Skip raster processing
 - Download all layers, preprocess, build vector outputs, export, and clean up
 
-### Common options
+### Main.py command-line options
 
 ```bash
-# Include federal layers
-python main.py --no-exclude-federal
-
-# Enable raster processing (requires Spatial Analyst)
-python main.py --raster
-
 # Use a specific config file
 python main.py --config config_2020-10-08.cfg
 
-# Filter to recently changed designations only
-python main.py --recent-only --start-date 2025-04-01
-
-# Keep intermediate data for inspection
-python main.py --skip-cleanup
-
-# Skip downloads (use what's already in the GDB)
-python main.py --skip-download
-
 # Verbose logging
 python main.py --verbose
+
+# Quiet logging
+python main.py --quiet
 ```
+
+For processing controls (date filter, federal exclusion, raster, skip download, skip cleanup, CHA filter), edit the `PIPELINE OPTIONS` block in `main.py`.
 
 ### All command-line flags
 
@@ -378,13 +368,6 @@ python main.py --verbose
 | `--config`, `-c` | None | Path to `.cfg` configuration file |
 | `--verbose`, `-v` | off | Increase log verbosity |
 | `--quiet`, `-q` | off | Suppress log output |
-| `--skip-download` | off | Skip the download step |
-| `--raster` / `--no-raster` | off | Enable/disable raster processing |
-| `--skip-cleanup` | off | Keep intermediate FCs in working GDB |
-| `--recent-only` | off | Filter sources to date window |
-| `--start-date` | 2025-04-01 | Start of date filter window |
-| `--end-date` | today | End of date filter window |
-| `--exclude-federal` / `--no-exclude-federal` | on | Exclude/include federal designations |
 
 
 
@@ -475,7 +458,7 @@ Defines all 42 designation layers. Each row configures one data source. Key colu
 | **exclude** | `T` to exclude the source from all operations. |
 | **manual_download** | `T` if the source must be downloaded manually to `source_data/`. |
 | **name** | Full name of the designation (e.g., "National Parks (Administered Lands)"). |
-| **jurisdiction** | `federal` for federal sources; blank for provincial. Used by `--exclude-federal`. |
+| **jurisdiction** | `federal` for federal sources; blank for provincial. Used by `EXCLUDE_FEDERAL` in `main.py`. |
 | **designation** | Machine-readable underscore-separated code (e.g., `park_national`). |
 | **source_id_col** | Column in the source data providing the unique feature ID. |
 | **source_name_col** | Column providing the feature name. |
@@ -485,7 +468,7 @@ Defines all 42 designation layers. Each row configures one data source. Key colu
 | **url** | BC Data Catalogue URL or direct download URL. |
 | **bcgw_layer_name** | BCGW WFS layer name (if different from catalogue-resolved name). |
 | **query** | CQL filter for WFS requests (e.g., `PARK_CLASS <> 'REC'`). |
-| **date_filter_query** | CQL query with `{start_date}` / `{end_date}` placeholders for `--recent-only`. |
+| **date_filter_query** | CQL query with `{start_date}` / `{end_date}` placeholders used when `RECENT_ONLY = True`. |
 | **preprocess_operation** | `clip` or `union` (dissolve). |
 | **preprocess_args** | Arguments for preprocessing (clip boundary FC or dissolve columns). |
 
@@ -524,7 +507,7 @@ Defines 7 supporting layers used during processing (not designation layers thems
 │   ├── designatedlands_output.gdb/  # Final clean output geodatabase
 │   └── designated_lands_pipeline_report.xlsx  # Pipeline report
 ├── logs/                            # Timestamped run logs
-├── rasters/                         # Raster outputs (when --raster is used)
+├── rasters/                         # Raster outputs (when RASTER = True)
 └── scripts/                         # Utility scripts
   └── utility_scripts/
     ├── Create_CHA_AOI.py        # Legacy/alternate CHA AOI preparation helper
@@ -547,7 +530,7 @@ Key responsibilities:
 - Calls `DesignatedLands()` constructor (loads CSVs, applies filters, sets up GDB)
 - Wraps each step in `run_step()` which captures arcpy messages and logs failures
 - Generates an xlsx report on every run, summarising changes, excluded layers, feature counts, pipeline options, and designation categories
-- Controls optional steps (raster, cleanup) via CLI flags
+- Controls optional steps ( eg. raster, cleanup) via the PIPELINE OPTIONS block in main.py
 - Controls the CHA definition query scope via `CHA_FILTER_OUT_WRS` — when `False`, overrides the CSV query to include all species (FINAL + BC only)
 
 ### `designatedlands.py` — Core Processing Engine
@@ -563,9 +546,9 @@ Contains the `DesignatedLands` class with all geoprocessing methods:
 | `preprocess()` | Apply per-source clip/dissolve operations |
 | `create_bc_boundary()` | Merge land + marine boundaries into single `bc_boundary` FC |
 | `create_designations_overlapping()` | Clip each source to BC and stack into overlapping output |
-| `create_designations_planarized()` | Union → priority assignment → Dissolve into non-overlapping output |
+| `create_designations_planarized()` | Union → spatial grouping/ranking → non-overlapping output |
 | `rasterize()` | Convert vector designations to per-source GeoTIFFs |
-| `overlay_rasters()` | Combine rasters using NumPy (highest priority wins) |
+| `overlay_rasters()` | Combine rasters using NumPy (lowest process_order wins; highest priority) |
 | `dump()` | Export final FCs to `outputs/designatedlands_output.gdb` |
 | `overlay()` | Intersect an external layer with `designations_overlapping` |
 | `cleanup()` | Remove intermediate `src_*` and `*_pp` FCs from working GDB |
@@ -581,11 +564,12 @@ The module also provides:
 Provides date-based WFS queries and xlsx report generation using **openpyxl**:
 
 - `apply_date_filter_to_query()` — Injects `{start_date}` and `{end_date}` into CQL query templates.
-- `run_report()` — Queries WFS for recently changed features and generates a 4-sheet Excel workbook:
+- `run_report()` — Queries WFS for recently changed features and generates a 5-sheet Excel workbook:
   - **Changes**: Features added/modified within the date window
   - **Excluded Layers**: Layers removed by date or federal filter
   - **Summary**: Feature counts per designation
-  - **Pipeline Options**: Flags used for the current run
+  - **Pipeline Options**: Run settings, excluded federal layer list, and source query filters used for the current run
+  - **Designation Categories**: Designation-to-category mapping used in the report
 - `write_report_xlsx()` — Low-level workbook creation with formatted headers and auto-sized columns.
 
 ### `resume_pipeline.py` — Smart Resume
@@ -645,7 +629,7 @@ Run before production pipeline executions to catch broken or outdated CQL querie
 
 The `dump` step writes two feature classes to `outputs/designatedlands_output.gdb`:
 
-> **Naming convention:** When the date filter is active (`--recent-only`), all output names are suffixed with `_date_filter` (e.g., `designations_overlapping_date_filter`, `designations_planarized_date_filter`). This ensures date-filtered outputs are immediately distinguishable from full-run outputs when both exist in the same geodatabase.
+> **Naming convention:** When the date filter is active (`RECENT_ONLY = True`), all output names are suffixed with `_date_filter` (e.g., `designations_overlapping_date_filter`, `designations_planarized_date_filter`). This ensures date-filtered outputs are immediately distinguishable from full-run outputs when both exist in the same geodatabase.
 
 ### `designations_overlapping`
 
@@ -666,7 +650,8 @@ Each individual designation polygon, clipped to land boundary, with full attribu
 ### `designations_planarized`
 
 - Intermediate data similar to Land Designation Dataset
-- source_id and source_name will be blank (*Possible future improvement to populate these)
+- source_id and source_name are populated from the highest-priority contributing source feature (lowest `process_order`)
+- if multiple contributing features share the same winning `process_order`, tie-breaks are deterministic: prefer populated source fields, then lexicographically smallest `source_id` and `source_name`
 
 Non-overlapping output. Where designations overlap, the polygon is assigned to the highest-priority designation. Restriction fields hold the maximum value across all overlapping designations. All contributing designation names are listed in `overlapping_designations`.
 
@@ -675,9 +660,11 @@ Non-overlapping output. Where designations overlap, the polygon is assigned to t
 | `process_order` | Priority rank from CSV |
 | `designation` | Highest-priority designation code on 1 - 42 scale from .csv file (lowest `process_order`) |
 | `overlapping_designations` | Semicolon-delimited list of all designation codes that overlap this polygon (e.g., `vqo_retain; fsw`), sorted by priority |
+| `source_id` | Source feature ID from the winning (highest-priority) contributing designation feature |
+| `source_name` | Source feature name from the winning (highest-priority) contributing designation feature |
 | `forest_restriction_max` | Maximum forest restriction across overlapping designations |
-| `og_restriction_max` | Maximum oil & gas restriction |
 | `mine_restriction_max` | Maximum mine restriction |
+| `og_restriction_max` | Maximum oil & gas restriction |
 
 
 ## CHA Intersection Outputs
@@ -744,9 +731,9 @@ This mixed set (base + `_date_filter` + date-stamped `_cha_MM_DD`) is expected w
 
 ## Raster Outputs (Optional)
 
-When `--raster` is enabled, four GeoTIFFs are produced in `outputs/`:
+When `RASTER = True`, four GeoTIFFs are produced in `outputs/`:
 
-1. `designatedlands.tif` — Designation codes (highest process_order wins in overlaps)
+1. `designatedlands.tif` — Designation codes (lowest process_order wins in overlaps; highest priority)
 2. `forest_restriction.tif` — Forest restriction levels
 3. `og_restriction.tif` — Oil & gas restriction levels
 4. `mine_restriction.tif` — Mine restriction levels
