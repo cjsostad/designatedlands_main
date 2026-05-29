@@ -74,7 +74,7 @@ def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None):
 
     os.makedirs(source_data_dir, exist_ok=True)
 
-    out_gdb = os.path.join(source_data_dir, "critical_habitat_area.gdb")
+    out_gdb = os.path.join(source_data_dir, "cha_exported.gdb")
     out_fc = os.path.join(out_gdb, CHA_DESIGNATION)
 
     if arcpy.Exists(out_fc) and not overwrite:

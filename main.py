@@ -89,6 +89,8 @@ def main():
     # =================================================================
     # PIPELINE OPTIONS  —  Edit these directly, then hit Run in VS Code
     # =================================================================
+
+    # If changing the date filter settings, run pipeline_reset.py before running main.py to clear out stale layers from the GDB so the next run downloads fresh data matching your new settings.
     RECENT_ONLY    = True           # True = only process features new/modified in date window
     START_DATE     = "2025-04-01"   # Start of date window (YYYY-MM-DD)
     END_DATE       = "2026-04-01"           # End of date window (None = today)
@@ -313,7 +315,7 @@ def main():
     cha_fc = os.path.join(
         script_dir,
         "source_data",
-        "critical_habitat_area.gdb",
+        "cha_exported.gdb",
         "critical_habitat_area"
     )
 

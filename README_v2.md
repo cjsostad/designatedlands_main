@@ -138,7 +138,7 @@ All processing is performed in **NAD 1983 BC Environment Albers (EPSG:3005)**, t
 
 - **BC Geographic Warehouse (BCGW)**: Most designation layers are downloaded automatically via the province's public WFS endpoint (`https://openmaps.gov.bc.ca/geo/pub/wfs`). The pipeline resolves BC Data Catalogue URLs to WFS layer names and fetches GeoJSON features with optional CQL query filters.
 - **Manual downloads**: A few sources (e.g., private conservation lands) are not available via WFS. These are placed in the `source_data/` folder and referenced from the CSV.
-- **Critical Habitat Area**: The Critical Habitat Area dataset is sourced from ECCC's national Critical Habitat of Species at Risk in Canada data portal. The pipeline downloads CriticalHabitat.zip directly from the ECCC open data API at runtime and extracts CriticalHabitat.gdb into the source_data/ directory. If the download fails, the pipeline falls back to an existing local copy of CriticalHabitat.gdb in source_data/ if one is present — allowing the pipeline to proceed using a manually downloaded copy. If neither is available, the pipeline will raise an error with instructions to download the zip manually.
+- **Critical Habitat Area**: The Critical Habitat Area dataset is sourced from ECCC's national Critical Habitat of Species at Risk in Canada data portal. The pipeline downloads CriticalHabitat.zip directly from the ECCC open data API at runtime and extracts and renames the GDB to `CriticalHabitat_eccc_src.gdb` in `source_data/`. Any leftover hash-named extraction folders are removed automatically. If the download fails, the pipeline falls back to an existing local `CriticalHabitat_eccc_src.gdb` (or the legacy `CriticalHabitat.gdb`) in `source_data/` if one is present — allowing the pipeline to proceed using a manually downloaded copy. If neither is available, the pipeline will raise an error with instructions to download the zip manually.
 Filtering
 The national CHA dataset covers all of Canada and all species. The pipeline applies a definition query to filter to the relevant subset before exporting to a local feature class. The default filter applied is:
 RD_Status IN (1) 
@@ -158,7 +158,7 @@ Remove Wide Ranging Species — a defined list of wide-ranging species is exclud
 The species exclusion list is controlled by the CHA_FILTER_OUT_WRS flag in main.py. When set to True, the full filter above is applied. When set to False, only the FINAL status and BC filters are applied and all species are included — useful for testing or when a full species coverage run is required.
 
 **Output**
-Before export, the pipeline stamps the original ECCC `OBJECTID` of each feature into a new attribute field called `CHA_Source_ID`. The filtered features are then exported to a new local feature class at source_data/critical_habitat_area.gdb/critical_habitat_area using FeatureClassToFeatureClass. Although ArcGIS reassigns OBJECTIDs sequentially during export, `CHA_Source_ID` survives as a regular field and flows through all subsequent intersection outputs. `CHA_Source_ID` can be joined directly to `OBJECTID` in the original ECCC `CriticalHabitat.gdb` to trace any output row back to the source national polygon.
+Before export, the pipeline stamps the original ECCC `OBJECTID` of each feature into a new attribute field called `CHA_Source_ID`. The filtered features are then exported to a new local feature class at `source_data/cha_exported.gdb/critical_habitat_area` using FeatureClassToFeatureClass. Although ArcGIS reassigns OBJECTIDs sequentially during export, `CHA_Source_ID` survives as a regular field and flows through all subsequent intersection outputs. `CHA_Source_ID` can be joined directly to `OBJECTID` in the raw ECCC `CriticalHabitat_eccc_src.gdb` in `source_data/` to trace any output row back to the source national polygon.
 
 ### Federal exclusion
 
@@ -493,6 +493,7 @@ Defines 7 supporting layers used during processing (not designation layers thems
 
 ```
 ├── main.py                          # Full pipeline runner (recommended entry point)
+├── pipeline_reset.py                # Pre-run GDB cleanup utility — delete stale FCs before changing RECENT_ONLY or date settings
 ├── designatedlands.py               # Core DesignatedLands class and geoprocessing logic
 ├── date_filter.py                   # Date-based filtering and xlsx report generation
 ├── create_cha.py                    # Download and prepare the CHA dataset from ECCC
@@ -591,7 +592,7 @@ Downloads and prepares the **Critical Habitat Area (CHA)** dataset from ECCC's n
 - Reads the CHA entry from `sources_supporting.csv` (URL, definition query, field mappings).
 - Downloads `CriticalHabitat.zip` with retry logic (up to 3 attempts) and extracts the geodatabase into `source_data/`.
 - Applies the definition query to filter to **FINAL** status, **British Columbia** province, and (by default) excludes specified species. When called with `query_override`, uses the provided query instead of the CSV-defined one.
-- Falls back to an existing local copy of `CriticalHabitat.gdb` if all download attempts fail.
+- After a successful download, renames the extracted GDB from `CriticalHabitat.gdb` to `CriticalHabitat_eccc_src.gdb` and removes any leftover hash-named extraction folders from `source_data/`. Falls back to an existing local `CriticalHabitat_eccc_src.gdb` (or the legacy `CriticalHabitat.gdb`) if all download attempts fail.
 
 Can be run standalone (`python create_cha.py`) or called from the pipeline via `prepare_cha()`.
 

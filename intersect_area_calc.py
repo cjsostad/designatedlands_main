@@ -285,7 +285,7 @@ if __name__ == "__main__":
     run_cha_intersection(
         cha_fc=os.path.join(
             script_dir, "source_data",
-            "critical_habitat_area.gdb", "critical_habitat_area"
+            "cha_exported.gdb", "critical_habitat_area"
         ),
         planarized_fc=os.path.join(gdb, "designations_planarized"),
         overlapping_fc=os.path.join(gdb, "designations_overlapping"),

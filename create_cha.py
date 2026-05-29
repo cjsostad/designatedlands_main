@@ -42,7 +42,9 @@ import zipfile
 LOG = logging.getLogger(__name__)
 
 CHA_DESIGNATION = "critical_habitat_area"
-CHA_GDB_NAME = "CriticalHabitat.gdb"
+CHA_GDB_NAME = "CriticalHabitat.gdb"          # name as it appears inside the ECCC zip
+ECCC_CHA_NAME = "CriticalHabitat_eccc_src.gdb"  # local stored name after extraction
+CHA_OUTPUT_GDB = "cha_exported.gdb"            # BC-filtered output GDB
 
 
 def _find_cha_config(csv_path=None):
@@ -149,8 +151,12 @@ def _download_cha_zip(url, dest_dir, max_retries=3, timeout=60):
 
             # Check if GDB was extracted at expected location
             if os.path.exists(src_gdb_path):
-                print(f"[CHA] Extracted: {src_gdb_path}")
-                return src_gdb_path
+                local_path = os.path.join(dest_dir, ECCC_CHA_NAME)
+                if os.path.exists(local_path):
+                    shutil.rmtree(local_path, ignore_errors=True)
+                os.rename(src_gdb_path, local_path)
+                print(f"[CHA] Extracted and saved as: {local_path}")
+                return local_path
 
             # Check for nested GDB and move it
             for root, dirs, _files in os.walk(dest_dir):
@@ -159,7 +165,21 @@ def _download_cha_zip(url, dest_dir, max_retries=3, timeout=60):
                     if nested != src_gdb_path:
                         shutil.move(nested, src_gdb_path)
                         print(f"[CHA] Moved nested GDB to: {src_gdb_path}")
-                    return src_gdb_path
+                        # Delete the leftover hash-named extraction folder
+                        rel = os.path.relpath(root, dest_dir)
+                        top_level_name = rel.split(os.sep)[0]
+                        top_level_dir = os.path.join(dest_dir, top_level_name)
+                        if (os.path.exists(top_level_dir)
+                                and os.path.abspath(top_level_dir) != os.path.abspath(dest_dir)):
+                            shutil.rmtree(top_level_dir, ignore_errors=True)
+                            print(f"[CHA] Cleaned up extraction folder: {top_level_dir}")
+                    # Rename to local stored name
+                    local_path = os.path.join(dest_dir, ECCC_CHA_NAME)
+                    if os.path.exists(local_path):
+                        shutil.rmtree(local_path, ignore_errors=True)
+                    os.rename(src_gdb_path, local_path)
+                    print(f"[CHA] Saved as: {local_path}")
+                    return local_path
 
             print(f"[CHA] WARNING: Zip extracted but {CHA_GDB_NAME} not found")
             return None
@@ -217,7 +237,7 @@ def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None,
     os.makedirs(source_data_dir, exist_ok=True)
 
     # Output FC goes into a file GDB inside source_data/
-    out_gdb = os.path.join(source_data_dir, "critical_habitat_area.gdb")
+    out_gdb = os.path.join(source_data_dir, CHA_OUTPUT_GDB)
     out_fc = os.path.join(out_gdb, CHA_DESIGNATION)
 
     if arcpy.Exists(out_fc) and not overwrite:
@@ -226,24 +246,28 @@ def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None,
         return out_fc
 
     # Try to download; fall back to existing GDB if download fails
-    src_gdb_path = os.path.join(source_data_dir, CHA_GDB_NAME)
+    local_gdb_path = os.path.join(source_data_dir, ECCC_CHA_NAME)
+    legacy_gdb_path = os.path.join(source_data_dir, CHA_GDB_NAME)
 
     downloaded = _download_cha_zip(cfg["url"], source_data_dir)
 
     if downloaded:
         src_gdb = downloaded
-    elif os.path.exists(src_gdb_path):
-        print(f"[CHA] Falling back to existing {src_gdb_path}")
-        src_gdb = src_gdb_path
+    elif os.path.exists(local_gdb_path):
+        print(f"[CHA] Falling back to existing {local_gdb_path}")
+        src_gdb = local_gdb_path
+    elif os.path.exists(legacy_gdb_path):
+        print(f"[CHA] Falling back to existing {legacy_gdb_path}")
+        src_gdb = legacy_gdb_path
     else:
         raise RuntimeError(
-            f"Download failed and no existing {CHA_GDB_NAME} found in "
+            f"Download failed and no existing {ECCC_CHA_NAME} found in "
             f"{source_data_dir}.\n\n"
             f"To proceed manually:\n"
             f"  1. Download the zip from:\n"
             f"     {cfg['url']}\n"
             f"  2. Extract {CHA_GDB_NAME} from the zip\n"
-            f"  3. Place {CHA_GDB_NAME} into the source_data/ folder\n"
+            f"  3. Rename it to {ECCC_CHA_NAME} and place it in the source_data/ folder\n"
             f"     in the same directory as this script\n"
             f"  4. Re-run the script"
         )
