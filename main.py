@@ -91,7 +91,7 @@ def main():
     # =================================================================
 
     # If changing the date filter settings, run pipeline_reset.py before running main.py to clear out stale layers from the GDB so the next run downloads fresh data matching your new settings.
-    RECENT_ONLY    = True           # True = only process features new/modified in date window
+    RECENT_ONLY    = False           # True = only process features new/modified in date window
     START_DATE     = "2025-04-01"   # Start of date window (YYYY-MM-DD)
     END_DATE       = "2026-04-01"           # End of date window (None = today)
     EXCLUDE_FEDERAL = True          # Exclude National Parks, NWAs, Migratory Bird Sanctuaries

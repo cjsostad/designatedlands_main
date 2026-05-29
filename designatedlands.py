@@ -30,6 +30,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import sys
 import tarfile
 import tempfile
@@ -306,6 +307,16 @@ def get_compressed_file_wrapper(path):
 # Download helpers
 # ---------------------------------------------------------------------------
 
+def _rmtree_robust(path: str) -> None:
+    """Remove a directory tree, handling read-only files (common with .gdb folders on Windows)."""
+    def _on_error(func, fpath, exc_info):
+        try:
+            os.chmod(fpath, stat.S_IWRITE)
+            func(fpath)
+        except Exception:
+            pass
+    shutil.rmtree(path, onerror=_on_error)
+
 def download_file(url: str, path: str, filename: str, overwrite: bool = False):
     """
     Download a zip/tar archive from *url* and extract it.
@@ -319,7 +330,7 @@ def download_file(url: str, path: str, filename: str, overwrite: bool = False):
     if overwrite:
         for folder in {out_folder, legacy_out_folder}:
             if os.path.exists(folder):
-                shutil.rmtree(folder)
+                _rmtree_robust(folder)
 
     if not os.path.exists(out_folder) and os.path.exists(legacy_out_folder):
         LOG.info("Using legacy cache folder %s", legacy_out_folder)
@@ -988,6 +999,28 @@ class DesignatedLands:
                         layer_in_file = get_first_layer(local_file)
                     except Exception:
                         layer_in_file = None
+
+                # Self-heal: if the cached download is missing or corrupt,
+                # force a fresh re-download rather than crashing mid-pipeline.
+                src_check = resolve_layer_path(local_file, layer_in_file)
+                if not arcpy.Exists(src_check):
+                    LOG.warning(
+                        "Cached download appears missing or corrupt (%s) — "
+                        "re-downloading from %s",
+                        src_check,
+                        url,
+                    )
+                    local_file, _ = download_file(
+                        url=url,
+                        path=self.config["dl_path"],
+                        filename=file_in_url,
+                        overwrite=True,
+                    )
+                    if not layer_in_file:
+                        try:
+                            layer_in_file = get_first_layer(local_file)
+                        except Exception:
+                            layer_in_file = None
 
                 load_file_to_gdb(
                     src_file=local_file,
