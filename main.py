@@ -1,5 +1,5 @@
 """
-Tested and working 03_19_26...
+Tested and working 05_29_26
 
 Run the full designatedlands pipeline in sequence.
 
@@ -91,10 +91,10 @@ def main():
     # =================================================================
     RECENT_ONLY    = True           # True = only process features new/modified in date window
     START_DATE     = "2025-04-01"   # Start of date window (YYYY-MM-DD)
-    END_DATE       = None           # End of date window (None = today)
+    END_DATE       = "2026-04-01"           # End of date window (None = today)
     EXCLUDE_FEDERAL = True          # Exclude National Parks, NWAs, Migratory Bird Sanctuaries
     SKIP_DOWNLOAD  = False          # True = skip WFS download (use existing data in GDB)
-    SKIP_CLEANUP   = False          # True = keep intermediate feature classes
+    SKIP_CLEANUP   = True          # True = keep intermediate feature classes
     RASTER         = False          # True = create raster outputs (requires Spatial Analyst)
     CHA_FILTER_OUT_WRS = False       # True = full CHA filter (FINAL + BC + exclude species)
                                     # False = minimal CHA filter (FINAL + BC only)

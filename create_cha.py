@@ -6,11 +6,19 @@ extracts the geodatabase, applies the definition query, and writes the
 filtered feature class into source_data/.
 
 Download behaviour:
-    - Attempts to download CriticalHabitat.zip.
+    - Attempts to download CriticalHabitat.zip from ECCC's data portal.
     - On success, extracts CriticalHabitat.gdb directly into source_data/
         (no hash folders).
     - If the download fails, falls back to an existing
-    source_data/CriticalHabitat.gdb if one is present.
+        source_data/CriticalHabitat.gdb if one is present.
+    - If neither succeeds, raises an error with manual download instructions.
+
+Manual download fallback (e.g. if behind a firewall):
+    1. Download CriticalHabitat.zip from the URL in sources_supporting.csv
+       (or directly from https://data-donnees.az.ec.gc.ca)
+    2. Extract CriticalHabitat.gdb from the zip
+    3. Place CriticalHabitat.gdb inside the source_data/ directory
+    4. Re-run — the script will detect and use the local copy
 
 Can be run standalone or called from the pipeline via prepare_cha().
 
@@ -26,7 +34,9 @@ import os
 import shutil
 import sys
 import tempfile
-from urllib.request import urlopen
+import time
+from urllib.request import urlopen, Request
+from urllib.error import URLError
 import zipfile
 
 LOG = logging.getLogger(__name__)
@@ -60,58 +70,123 @@ def _find_cha_config(csv_path=None):
     )
 
 
-def _download_cha_zip(url, dest_dir):
+def _download_cha_zip(url, dest_dir, max_retries=3, timeout=60):
     """
     Download the CHA zip from *url*, extract CriticalHabitat.gdb directly
     into *dest_dir* (no hash folders).
 
-    Returns the path to the extracted GDB, or None if the download failed.
+    Includes retry logic with exponential backoff to handle intermittent
+    connection failures (e.g., WinError 10054).
+
+    Parameters
+    ----------
+    url : str
+        URL to download the zip archive from.
+    dest_dir : str
+        Directory to extract the GDB into.
+    max_retries : int, optional
+        Maximum number of download attempts (default: 3).
+    timeout : int, optional
+        Timeout in seconds for the connection (default: 60).
+
+    Returns
+    -------
+    str or None
+        Path to the extracted GDB, or None if all download attempts failed.
     """
     src_gdb_path = os.path.join(dest_dir, CHA_GDB_NAME)
     temp_zip_path = None
 
-    print(f"[CHA] Downloading archive from {url}...")
-    try:
-        with tempfile.NamedTemporaryFile(
-            "wb", suffix=".zip", delete=False, dir=dest_dir
-        ) as temp_file:
-            temp_zip_path = temp_file.name
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"[CHA] Download attempt {attempt}/{max_retries} from {url}...")
+            
+            with tempfile.NamedTemporaryFile(
+                "wb", suffix=".zip", delete=False, dir=dest_dir
+            ) as temp_file:
+                temp_zip_path = temp_file.name
 
-        with urlopen(url) as response, open(temp_zip_path, "wb") as output_file:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                output_file.write(chunk)
+            # Create request with timeout
+            request = Request(url)
+            request.add_header('User-Agent', 'Mozilla/5.0')  # Some servers require User-Agent
+            
+            with urlopen(request, timeout=timeout) as response:
+                total_size = response.headers.get('Content-Length')
+                if total_size:
+                    total_size = int(total_size)
+                    print(f"[CHA] File size: {total_size / (1024*1024):.1f} MB")
+                
+                downloaded = 0
+                chunk_size = 1024 * 1024  # 1MB chunks
+                
+                with open(temp_zip_path, "wb") as output_file:
+                    while True:
+                        chunk = response.read(chunk_size)
+                        if not chunk:
+                            break
+                        output_file.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        # Progress reporting
+                        if total_size:
+                            percent = (downloaded / total_size) * 100
+                            print(f"[CHA] Progress: {percent:.1f}% ({downloaded / (1024*1024):.1f} MB)", end='\r')
+                
+                if total_size:
+                    print()  # New line after progress bar
 
-        if os.path.exists(src_gdb_path):
-            print(f"[CHA] Removing old {CHA_GDB_NAME}...")
-            shutil.rmtree(src_gdb_path)
+            print(f"[CHA] Download complete. Extracting...")
 
-        print(f"[CHA] Extracting {CHA_GDB_NAME} into {dest_dir}...")
-        with zipfile.ZipFile(temp_zip_path, "r") as zf:
-            zf.extractall(dest_dir)
+            # Extract the zip directly into dest_dir. We intentionally do NOT
+            # delete the old GDB first — it may be locked by ArcGIS Pro while
+            # the pipeline is running, and shutil.rmtree would fail with
+            # WinError 5 (Access Denied), discarding a successful download.
+            # zipfile.ZipFile.extractall() overwrites individual files in place,
+            # which works fine even when the GDB folder already exists.
+            print(f"[CHA] Extracting {CHA_GDB_NAME} into {dest_dir}...")
+            with zipfile.ZipFile(temp_zip_path, "r") as zf:
+                zf.extractall(dest_dir)
 
-        if os.path.exists(src_gdb_path):
-            print(f"[CHA] Extracted: {src_gdb_path}")
-            return src_gdb_path
-
-        for root, dirs, _files in os.walk(dest_dir):
-            if CHA_GDB_NAME in dirs:
-                nested = os.path.join(root, CHA_GDB_NAME)
-                if nested != src_gdb_path:
-                    shutil.move(nested, src_gdb_path)
-                    print(f"[CHA] Moved nested GDB to: {src_gdb_path}")
+            # Check if GDB was extracted at expected location
+            if os.path.exists(src_gdb_path):
+                print(f"[CHA] Extracted: {src_gdb_path}")
                 return src_gdb_path
 
-        print(f"[CHA] WARNING: Zip extracted but {CHA_GDB_NAME} not found")
-        return None
-    except Exception as exc:
-        print(f"[CHA] Download failed: {exc}")
-        return None
-    finally:
-        if temp_zip_path and os.path.exists(temp_zip_path):
-            os.unlink(temp_zip_path)
+            # Check for nested GDB and move it
+            for root, dirs, _files in os.walk(dest_dir):
+                if CHA_GDB_NAME in dirs:
+                    nested = os.path.join(root, CHA_GDB_NAME)
+                    if nested != src_gdb_path:
+                        shutil.move(nested, src_gdb_path)
+                        print(f"[CHA] Moved nested GDB to: {src_gdb_path}")
+                    return src_gdb_path
+
+            print(f"[CHA] WARNING: Zip extracted but {CHA_GDB_NAME} not found")
+            return None
+
+        except URLError as exc:
+            # Network-related errors (including WinError 10054)
+            if attempt < max_retries:
+                wait_time = 2 ** attempt  # Exponential backoff: 2, 4, 8 seconds
+                print(f"[CHA] Download failed: {exc}")
+                print(f"[CHA] Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+            else:
+                print(f"[CHA] Download failed after {max_retries} attempts: {exc}")
+                return None
+        except Exception as exc:
+            # Other errors (zip extraction, file system, etc.)
+            print(f"[CHA] Download failed: {exc}")
+            return None
+        finally:
+            # Clean up temp zip file
+            if temp_zip_path and os.path.exists(temp_zip_path):
+                try:
+                    os.unlink(temp_zip_path)
+                except Exception:
+                    pass  # Ignore cleanup errors
+    
+    return None
 
 
 def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None,
@@ -153,7 +228,6 @@ def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None,
     # Try to download; fall back to existing GDB if download fails
     src_gdb_path = os.path.join(source_data_dir, CHA_GDB_NAME)
 
-    print(f"[CHA] Downloading {cfg['url']}...")
     downloaded = _download_cha_zip(cfg["url"], source_data_dir)
 
     if downloaded:
@@ -164,26 +238,43 @@ def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None,
     else:
         raise RuntimeError(
             f"Download failed and no existing {CHA_GDB_NAME} found in "
-            f"{source_data_dir}. Download the zip manually, unzip "
-            f"{CHA_GDB_NAME} into {source_data_dir}, and re-run."
+            f"{source_data_dir}.\n\n"
+            f"To proceed manually:\n"
+            f"  1. Download the zip from:\n"
+            f"     {cfg['url']}\n"
+            f"  2. Extract {CHA_GDB_NAME} from the zip\n"
+            f"  3. Place {CHA_GDB_NAME} into the source_data/ folder\n"
+            f"     in the same directory as this script\n"
+            f"  4. Re-run the script"
         )
 
     print(f"[CHA] Using source GDB: {src_gdb}")
 
     # Determine layer name
     layer = cfg["layer_in_file"] or None
-    if layer:
+    prev_ws = arcpy.env.workspace
+    arcpy.env.workspace = src_gdb
+    available_fcs = [fc.lower() for fc in (arcpy.ListFeatureClasses() or [])]
+    arcpy.env.workspace = prev_ws
+
+    if layer and layer.lower() in available_fcs:
+        # Configured layer name exists — use it
         src = os.path.join(src_gdb, layer)
     else:
-        # Auto-detect first feature class
-        prev_ws = arcpy.env.workspace
-        arcpy.env.workspace = src_gdb
-        fcs = arcpy.ListFeatureClasses() or []
-        arcpy.env.workspace = prev_ws
-        if not fcs:
+        if layer:
+            # Configured layer name not found — warn and auto-detect
+            print(f"[CHA] WARNING: Configured layer '{layer}' not found in "
+                  f"{src_gdb}. Available: {available_fcs}. Auto-detecting...")
+            LOG.warning("Configured layer_in_file '%s' not found in %s; "
+                        "available: %s", layer, src_gdb, available_fcs)
+        if not available_fcs:
             raise ValueError(f"No feature classes found in {src_gdb}")
-        src = os.path.join(src_gdb, fcs[0])
-        layer = fcs[0]
+        # Use the first feature class found
+        arcpy.env.workspace = src_gdb
+        first_fc = (arcpy.ListFeatureClasses() or [])[0]
+        arcpy.env.workspace = prev_ws
+        src = os.path.join(src_gdb, first_fc)
+        layer = first_fc
         print(f"[CHA] Auto-detected layer: {layer}")
 
     # Create or recreate output GDB

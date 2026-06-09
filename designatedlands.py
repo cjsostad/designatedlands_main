@@ -759,14 +759,15 @@ class DesignatedLands:
     # ------------------------------------------------------------------
 
     def _init_workspace(self):
-        """Create the File Geodatabase if it does not already exist."""
-        gdb_dir = os.path.dirname(os.path.abspath(self.gdb))
-        gdb_name = os.path.basename(self.gdb)
-        if not arcpy.Exists(self.gdb):
-            LOG.info("Creating File Geodatabase: %s", self.gdb)
-            arcpy.management.CreateFileGDB(gdb_dir, gdb_name)
-        else:
-            LOG.info("Using existing File Geodatabase: %s", self.gdb)
+        """Create the File Geodatabase if it does not already exist.
+
+        Uses ``ensure_file_gdb`` to validate the path is actually a File GDB
+        workspace — not just a folder with the same name.  If the folder
+        exists but is not a valid GDB (e.g. because the user deleted all
+        files inside it), a RuntimeError is raised with a clear message
+        rather than silently writing shapefiles into the directory.
+        """
+        ensure_file_gdb(self.gdb, recreate_invalid=True, logger=LOG)
 
     def _read_config(self, config_file: str):
         """Read a .cfg configuration file (INI format)."""
