@@ -691,21 +691,29 @@ def create_rat(raster_path: str, lookup: dict):
 class DesignatedLands:
     """Holds the job configuration, workspace, and all processing methods."""
 
-    def __init__(self, config_file=None, recent_only=False,
+    def __init__(self, config_file=None,
                  start_date=None, end_date=None, exclude_federal=False):
         LOG.info("Initializing DesignatedLands")
 
         # Date filter settings
-        self.recent_only = recent_only
-        self.start_date = start_date or "2025-04-01"
-        self.end_date = end_date or date.today().isoformat()
+        # An empty / missing start_date means "no date filter" — process
+        # the full datasets. Any populated start_date enables filtering;
+        # end_date defaults to today when filtering is active.
+        self.start_date = (start_date or "").strip() or None
+        if self.start_date:
+            self.end_date = (end_date or "").strip() or date.today().isoformat()
+        else:
+            self.end_date = (end_date or "").strip() or None
+        self.date_filter_active = bool(self.start_date)
         self.exclude_federal = exclude_federal
         self.federal_excluded_sources = []  # populated by _read_sources
-        if self.recent_only:
+        if self.date_filter_active:
             LOG.info(
                 "Date filter ENABLED: %s to %s",
                 self.start_date, self.end_date,
             )
+        else:
+            LOG.info("Date filter DISABLED (full dataset)")
         if self.exclude_federal:
             LOG.info("Federal layers will be EXCLUDED")
 
@@ -847,7 +855,7 @@ class DesignatedLands:
         )
 
         # Apply date filter if enabled
-        if self.recent_only:
+        if self.date_filter_active:
             from date_filter import apply_date_filter_to_query, NO_DATE_FIELD, NON_BCGW
             filtered_sources = []
             for source in self.sources:
@@ -1070,7 +1078,7 @@ class DesignatedLands:
         Call this before preprocess/process-vector when download was skipped
         to fail fast with a clear message instead of crashing mid-operation.
 
-        When ``recent_only`` is enabled, missing *designation* sources are
+        When ``date_filter_active`` is enabled, missing *designation* sources are
         expected (date-filtered WFS queries often return 0 features) and
         are logged as warnings rather than causing a fatal error.  Missing
         *supporting* sources are always fatal because they are required
@@ -1080,7 +1088,7 @@ class DesignatedLands:
         ------
         RuntimeError
             If one or more supporting source feature classes are missing,
-            or if designation sources are missing when ``recent_only`` is
+            or if designation sources are missing when ``date_filter_active`` is
             not active.
         """
         missing_designations = []
@@ -1104,7 +1112,7 @@ class DesignatedLands:
             )
 
         if missing_designations:
-            if self.recent_only:
+            if self.date_filter_active:
                 LOG.warning(
                     "%d designation source(s) not in GDB (expected when "
                     "date filter returns 0 features):\n%s",
@@ -1902,16 +1910,13 @@ def build_parser():
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress output")
     parser.add_argument(
-        "--recent-only", action="store_true",
-        help="Enable date filtering — only process features changed in the date window",
-    )
-    parser.add_argument(
         "--start-date", metavar="YYYY-MM-DD", default=None,
-        help="Start date for the filter window (default: 2025-04-01)",
+        help="Start date for the filter window. Setting this enables date filtering. "
+             "Leave unset for no date filter (full datasets).",
     )
     parser.add_argument(
         "--end-date", metavar="YYYY-MM-DD", default=None,
-        help="End date for the filter window (default: today)",
+        help="End date for the filter window (default: today when --start-date is set)",
     )
     parser.add_argument(
         "--exclude-federal", action="store_true",
@@ -1962,7 +1967,6 @@ def main():
 
     DL = DesignatedLands(
         config_file=args.config,
-        recent_only=args.recent_only,
         start_date=args.start_date,
         end_date=args.end_date,
         exclude_federal=args.exclude_federal,
@@ -1976,33 +1980,34 @@ def main():
     elif cmd == "download":
         DL.download(designation=getattr(args, "designation", None),
                     overwrite=args.overwrite)
-        if DL.recent_only:
-            from date_filter import run_report
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            xlsx_path = os.path.join(
-                script_dir, "outputs", "designated_lands_pipeline_report.xlsx",
-            )
-            pipeline_options = {
-                "recent_only": DL.recent_only,
-                "exclude_federal": DL.exclude_federal,
-                "start_date": DL.start_date,
-                "end_date": DL.end_date,
-            }
-            written_report = run_report(
-                DL.start_date, DL.end_date,
-                xlsx_path=xlsx_path, avoid_overwrite=True,
-                exclude_federal=DL.exclude_federal,
-                federal_excluded=DL.federal_excluded_sources,
-                pipeline_options=pipeline_options,
-            )
-            print(f"[Report] Saved to {written_report}\n")
+        # Always emit the run-record xlsx report (audit trail). The report
+        # gracefully handles the "no date filter" case with placeholders.
+        from date_filter import run_report
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        xlsx_path = os.path.join(
+            script_dir, "outputs", "designated_lands_pipeline_report.xlsx",
+        )
+        pipeline_options = {
+            "date_filter_active": DL.date_filter_active,
+            "exclude_federal": DL.exclude_federal,
+            "start_date": DL.start_date,
+            "end_date": DL.end_date,
+        }
+        written_report = run_report(
+            DL.start_date, DL.end_date,
+            xlsx_path=xlsx_path, avoid_overwrite=True,
+            exclude_federal=DL.exclude_federal,
+            federal_excluded=DL.federal_excluded_sources,
+            pipeline_options=pipeline_options,
+        )
+        print(f"[Report] Saved to {written_report}\n")
 
     elif cmd == "preprocess":
         DL.preprocess(designation=getattr(args, "designation", None))
         DL.create_bc_boundary()
 
     elif cmd == "process-vector":
-        dl_suffix = "_date_filter" if DL.recent_only else ""
+        dl_suffix = "_date_filter" if DL.date_filter_active else ""
         DL.create_designations_overlapping(suffix=dl_suffix)
         DL.create_designations_planarized(suffix=dl_suffix)
 
@@ -2011,7 +2016,7 @@ def main():
         DL.overlay_rasters()
 
     elif cmd == "dump":
-        dl_suffix = "_date_filter" if DL.recent_only else ""
+        dl_suffix = "_date_filter" if DL.date_filter_active else ""
         DL.dump(suffix=dl_suffix)
 
     elif cmd == "overlay":

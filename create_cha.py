@@ -7,17 +7,23 @@ filtered feature class into source_data/.
 
 Download behaviour:
     - Attempts to download CriticalHabitat.zip from ECCC's data portal.
-    - On success, extracts CriticalHabitat.gdb directly into source_data/
-        (no hash folders).
+    - Extracts the zip into a TEMP sibling directory, validates the
+        extracted geodatabase actually contains feature classes, then
+        atomically moves it into source_data/CriticalHabitat.gdb.
+    - The GDB is stored under ONE name only — CriticalHabitat.gdb. No
+        rename to a second filename. This eliminates the WinError 183
+        failure mode where a stale empty GDB would block a fresh download.
     - If the download fails, falls back to an existing
-        source_data/CriticalHabitat.gdb if one is present.
+        source_data/CriticalHabitat.gdb only if it contains feature
+        classes.
     - If neither succeeds, raises an error with manual download instructions.
 
 Manual download fallback (e.g. if behind a firewall):
     1. Download CriticalHabitat.zip from the URL in sources_supporting.csv
        (or directly from https://data-donnees.az.ec.gc.ca)
     2. Extract CriticalHabitat.gdb from the zip
-    3. Place CriticalHabitat.gdb inside the source_data/ directory
+    3. Place CriticalHabitat.gdb directly inside the source_data/ directory
+       (no rename needed — the pipeline uses this exact name)
     4. Re-run — the script will detect and use the local copy
 
 Can be run standalone or called from the pipeline via prepare_cha().
@@ -43,8 +49,79 @@ LOG = logging.getLogger(__name__)
 
 CHA_DESIGNATION = "critical_habitat_area"
 CHA_GDB_NAME = "CriticalHabitat.gdb"          # name as it appears inside the ECCC zip
-ECCC_CHA_NAME = "CriticalHabitat_eccc_src.gdb"  # local stored name after extraction
+                                              # and the ONLY name we use locally
+LEGACY_GDB_NAME = "CriticalHabitat_eccc_src.gdb"  # legacy name from older runs;
+                                                  # detected for migration only
 CHA_OUTPUT_GDB = "cha_exported.gdb"            # BC-filtered output GDB
+
+
+def _rmtree_robust(path):
+    """
+    Delete a directory tree, retrying once with permission fix-ups for any
+    read-only files. Returns True if the directory is gone afterwards.
+    """
+    if not os.path.exists(path):
+        return True
+
+    def _on_rm_error(func, p, exc_info):
+        try:
+            import stat
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception:
+            pass
+
+    try:
+        shutil.rmtree(path, onerror=_on_rm_error)
+    except Exception as exc:
+        print(f"[CHA] Could not remove {path}: {exc}")
+        return False
+    return not os.path.exists(path)
+
+
+def _list_feature_classes(gdb_path):
+    """
+    Return a list of feature class names inside *gdb_path* using arcpy.
+    Empty list if the GDB exists but has no feature classes, or if it
+    cannot be opened.
+
+    NOTE: opening a file GDB with arcpy creates schema lock files
+    (*.sr.lock) inside the GDB folder. Do NOT call this on a GDB that
+    you plan to move/rename immediately afterwards \u2014 use
+    _looks_like_valid_gdb() for that instead.
+    """
+    import arcpy
+    if not os.path.exists(gdb_path):
+        return []
+    prev = arcpy.env.workspace
+    try:
+        arcpy.env.workspace = gdb_path
+        return list(arcpy.ListFeatureClasses() or [])
+    except Exception:
+        return []
+    finally:
+        arcpy.env.workspace = prev
+
+
+def _looks_like_valid_gdb(gdb_path):
+    """
+    Pure-filesystem check that *gdb_path* is a non-empty file
+    geodatabase. Returns True if the folder exists and contains at
+    least one .gdbtable file (the on-disk container for a dataset).
+
+    Used to validate a freshly extracted GDB BEFORE it is moved into
+    place, without touching arcpy (which would create schema lock
+    files that block the move).
+    """
+    if not os.path.isdir(gdb_path):
+        return False
+    try:
+        for name in os.listdir(gdb_path):
+            if name.lower().endswith(".gdbtable"):
+                return True
+    except OSError:
+        return False
+    return False
 
 
 def _find_cha_config(csv_path=None):
@@ -74,138 +151,142 @@ def _find_cha_config(csv_path=None):
 
 def _download_cha_zip(url, dest_dir, max_retries=3, timeout=60):
     """
-    Download the CHA zip from *url*, extract CriticalHabitat.gdb directly
-    into *dest_dir* (no hash folders).
+    Download the CHA zip from *url* and extract CriticalHabitat.gdb into
+    *dest_dir*.
 
-    Includes retry logic with exponential backoff to handle intermittent
-    connection failures (e.g., WinError 10054).
+    Strategy (deliberately simple, no two-name renames):
+        1. Download zip to a temp file inside *dest_dir*.
+        2. Extract zip into a fresh sibling temp directory.
+        3. Locate CriticalHabitat.gdb inside the extraction (may be nested).
+        4. Validate the extracted GDB actually has feature classes.
+        5. Robustly remove any existing dest_dir/CriticalHabitat.gdb.
+        6. Move the validated GDB into dest_dir/CriticalHabitat.gdb.
+        7. Clean up temp artifacts.
+
+    The function NEVER renames the GDB to a second name. The GDB is
+    stored under one canonical name (CHA_GDB_NAME) for the lifetime of
+    the project. This eliminates the WinError 183 / "file already exists"
+    failure mode where a stale empty GDB blocks a successful download.
 
     Parameters
     ----------
     url : str
-        URL to download the zip archive from.
     dest_dir : str
-        Directory to extract the GDB into.
-    max_retries : int, optional
-        Maximum number of download attempts (default: 3).
-    timeout : int, optional
-        Timeout in seconds for the connection (default: 60).
+    max_retries : int
+    timeout : int
 
     Returns
     -------
     str or None
-        Path to the extracted GDB, or None if all download attempts failed.
+        Path to the final extracted GDB, or None on any failure.
     """
-    src_gdb_path = os.path.join(dest_dir, CHA_GDB_NAME)
-    temp_zip_path = None
+    final_gdb_path = os.path.join(dest_dir, CHA_GDB_NAME)
 
     for attempt in range(1, max_retries + 1):
+        temp_zip_path = None
+        extract_dir = tempfile.mkdtemp(prefix="cha_extract_", dir=dest_dir)
+
         try:
             print(f"[CHA] Download attempt {attempt}/{max_retries} from {url}...")
-            
+
             with tempfile.NamedTemporaryFile(
                 "wb", suffix=".zip", delete=False, dir=dest_dir
             ) as temp_file:
                 temp_zip_path = temp_file.name
 
-            # Create request with timeout
             request = Request(url)
-            request.add_header('User-Agent', 'Mozilla/5.0')  # Some servers require User-Agent
-            
+            request.add_header("User-Agent", "Mozilla/5.0")
+
             with urlopen(request, timeout=timeout) as response:
-                total_size = response.headers.get('Content-Length')
+                total_size = response.headers.get("Content-Length")
                 if total_size:
                     total_size = int(total_size)
-                    print(f"[CHA] File size: {total_size / (1024*1024):.1f} MB")
-                
+                    print(f"[CHA] File size: {total_size / (1024 * 1024):.1f} MB")
+
                 downloaded = 0
-                chunk_size = 1024 * 1024  # 1MB chunks
-                
-                with open(temp_zip_path, "wb") as output_file:
+                chunk_size = 1024 * 1024  # 1 MB
+                with open(temp_zip_path, "wb") as out_f:
                     while True:
                         chunk = response.read(chunk_size)
                         if not chunk:
                             break
-                        output_file.write(chunk)
+                        out_f.write(chunk)
                         downloaded += len(chunk)
-                        
-                        # Progress reporting
                         if total_size:
-                            percent = (downloaded / total_size) * 100
-                            print(f"[CHA] Progress: {percent:.1f}% ({downloaded / (1024*1024):.1f} MB)", end='\r')
-                
+                            pct = (downloaded / total_size) * 100
+                            print(
+                                f"[CHA] Progress: {pct:.1f}% "
+                                f"({downloaded / (1024 * 1024):.1f} MB)",
+                                end="\r",
+                            )
                 if total_size:
-                    print()  # New line after progress bar
+                    print()
 
-            print(f"[CHA] Download complete. Extracting...")
-
-            # Extract the zip directly into dest_dir. We intentionally do NOT
-            # delete the old GDB first — it may be locked by ArcGIS Pro while
-            # the pipeline is running, and shutil.rmtree would fail with
-            # WinError 5 (Access Denied), discarding a successful download.
-            # zipfile.ZipFile.extractall() overwrites individual files in place,
-            # which works fine even when the GDB folder already exists.
-            print(f"[CHA] Extracting {CHA_GDB_NAME} into {dest_dir}...")
+            print(f"[CHA] Download complete. Extracting into temp dir...")
             with zipfile.ZipFile(temp_zip_path, "r") as zf:
-                zf.extractall(dest_dir)
+                zf.extractall(extract_dir)
 
-            # Check if GDB was extracted at expected location
-            if os.path.exists(src_gdb_path):
-                local_path = os.path.join(dest_dir, ECCC_CHA_NAME)
-                if os.path.exists(local_path):
-                    shutil.rmtree(local_path, ignore_errors=True)
-                os.rename(src_gdb_path, local_path)
-                print(f"[CHA] Extracted and saved as: {local_path}")
-                return local_path
-
-            # Check for nested GDB and move it
-            for root, dirs, _files in os.walk(dest_dir):
+            # Locate the GDB inside the extraction (may be nested one
+            # level deep).
+            extracted_gdb = None
+            for root, dirs, _files in os.walk(extract_dir):
                 if CHA_GDB_NAME in dirs:
-                    nested = os.path.join(root, CHA_GDB_NAME)
-                    if nested != src_gdb_path:
-                        shutil.move(nested, src_gdb_path)
-                        print(f"[CHA] Moved nested GDB to: {src_gdb_path}")
-                        # Delete the leftover hash-named extraction folder
-                        rel = os.path.relpath(root, dest_dir)
-                        top_level_name = rel.split(os.sep)[0]
-                        top_level_dir = os.path.join(dest_dir, top_level_name)
-                        if (os.path.exists(top_level_dir)
-                                and os.path.abspath(top_level_dir) != os.path.abspath(dest_dir)):
-                            shutil.rmtree(top_level_dir, ignore_errors=True)
-                            print(f"[CHA] Cleaned up extraction folder: {top_level_dir}")
-                    # Rename to local stored name
-                    local_path = os.path.join(dest_dir, ECCC_CHA_NAME)
-                    if os.path.exists(local_path):
-                        shutil.rmtree(local_path, ignore_errors=True)
-                    os.rename(src_gdb_path, local_path)
-                    print(f"[CHA] Saved as: {local_path}")
-                    return local_path
+                    extracted_gdb = os.path.join(root, CHA_GDB_NAME)
+                    break
 
-            print(f"[CHA] WARNING: Zip extracted but {CHA_GDB_NAME} not found")
-            return None
+            if extracted_gdb is None:
+                print(f"[CHA] WARNING: {CHA_GDB_NAME} not found in zip")
+                return None
+
+            # Validate: filesystem-only check (do NOT use arcpy here \u2014
+            # opening the GDB would create *.sr.lock files inside the
+            # extracted folder, and those locks would then block the
+            # shutil.move() with "Permission denied").
+            if not _looks_like_valid_gdb(extracted_gdb):
+                print(
+                    f"[CHA] WARNING: Extracted {CHA_GDB_NAME} looks empty "
+                    f"(no .gdbtable files); treating as failed download"
+                )
+                return None
+            print(f"[CHA] Extracted GDB validated (contains .gdbtable files)")
+
+            # Robustly remove any existing copy at the final location
+            # BEFORE the move. If we cannot delete it, fail the download
+            # cleanly so the caller can fall back to whatever is there.
+            if os.path.exists(final_gdb_path):
+                print(f"[CHA] Removing previous {final_gdb_path}...")
+                if not _rmtree_robust(final_gdb_path):
+                    print(
+                        f"[CHA] ERROR: Could not remove existing "
+                        f"{final_gdb_path} (likely locked by ArcGIS Pro). "
+                        f"Close any open project and re-run."
+                    )
+                    return None
+
+            shutil.move(extracted_gdb, final_gdb_path)
+            print(f"[CHA] Installed: {final_gdb_path}")
+            return final_gdb_path
 
         except URLError as exc:
-            # Network-related errors (including WinError 10054)
             if attempt < max_retries:
-                wait_time = 2 ** attempt  # Exponential backoff: 2, 4, 8 seconds
-                print(f"[CHA] Download failed: {exc}")
-                print(f"[CHA] Retrying in {wait_time} seconds...")
-                time.sleep(wait_time)
-            else:
-                print(f"[CHA] Download failed after {max_retries} attempts: {exc}")
-                return None
+                wait = 2 ** attempt
+                print(f"[CHA] Download failed: {exc}; retrying in {wait}s")
+                time.sleep(wait)
+                continue
+            print(f"[CHA] Download failed after {max_retries} attempts: {exc}")
+            return None
         except Exception as exc:
-            # Other errors (zip extraction, file system, etc.)
             print(f"[CHA] Download failed: {exc}")
             return None
         finally:
-            # Clean up temp zip file
             if temp_zip_path and os.path.exists(temp_zip_path):
                 try:
                     os.unlink(temp_zip_path)
                 except Exception:
-                    pass  # Ignore cleanup errors
-    
+                    pass
+            # Best-effort cleanup of the extraction temp dir
+            _rmtree_robust(extract_dir)
+
     return None
 
 
@@ -245,30 +326,47 @@ def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None,
         print(f"[CHA] Already exists: {out_fc} (use overwrite=True to rebuild)")
         return out_fc
 
-    # Try to download; fall back to existing GDB if download fails
-    local_gdb_path = os.path.join(source_data_dir, ECCC_CHA_NAME)
-    legacy_gdb_path = os.path.join(source_data_dir, CHA_GDB_NAME)
+    # ------------------------------------------------------------------
+    # Source GDB resolution — ONE canonical name (CriticalHabitat.gdb).
+    # ------------------------------------------------------------------
+    canonical_gdb = os.path.join(source_data_dir, CHA_GDB_NAME)
+    legacy_gdb = os.path.join(source_data_dir, LEGACY_GDB_NAME)
 
+    # One-time migration: if the legacy name is the only thing with data,
+    # promote it to the canonical name so future runs are predictable.
+    if (not os.path.exists(canonical_gdb)
+            and os.path.exists(legacy_gdb)
+            and _list_feature_classes(legacy_gdb)):
+        print(f"[CHA] Migrating legacy GDB: {legacy_gdb} -> {canonical_gdb}")
+        try:
+            shutil.move(legacy_gdb, canonical_gdb)
+        except Exception as exc:
+            print(f"[CHA] Migration failed ({exc}); will try a fresh download")
+
+    # Clean up any stale empty legacy GDB so it can never be picked up as
+    # a fallback again.
+    if os.path.exists(legacy_gdb) and not _list_feature_classes(legacy_gdb):
+        print(f"[CHA] Removing stale empty legacy GDB: {legacy_gdb}")
+        _rmtree_robust(legacy_gdb)
+
+    # Attempt fresh download (validated inside _download_cha_zip).
     downloaded = _download_cha_zip(cfg["url"], source_data_dir)
 
     if downloaded:
         src_gdb = downloaded
-    elif os.path.exists(local_gdb_path):
-        print(f"[CHA] Falling back to existing {local_gdb_path}")
-        src_gdb = local_gdb_path
-    elif os.path.exists(legacy_gdb_path):
-        print(f"[CHA] Falling back to existing {legacy_gdb_path}")
-        src_gdb = legacy_gdb_path
+    elif os.path.exists(canonical_gdb) and _list_feature_classes(canonical_gdb):
+        print(f"[CHA] Falling back to existing {canonical_gdb}")
+        src_gdb = canonical_gdb
     else:
         raise RuntimeError(
-            f"Download failed and no existing {ECCC_CHA_NAME} found in "
+            f"Download failed and no usable {CHA_GDB_NAME} found in "
             f"{source_data_dir}.\n\n"
             f"To proceed manually:\n"
             f"  1. Download the zip from:\n"
             f"     {cfg['url']}\n"
             f"  2. Extract {CHA_GDB_NAME} from the zip\n"
-            f"  3. Rename it to {ECCC_CHA_NAME} and place it in the source_data/ folder\n"
-            f"     in the same directory as this script\n"
+            f"  3. Place {CHA_GDB_NAME} directly inside the source_data/ folder\n"
+            f"     (no rename needed — the pipeline uses this exact name)\n"
             f"  4. Re-run the script"
         )
 
@@ -301,10 +399,24 @@ def prepare_cha(source_data_dir=None, overwrite=True, csv_path=None,
         layer = first_fc
         print(f"[CHA] Auto-detected layer: {layer}")
 
-    # Create or recreate output GDB
+    # Create or recreate output GDB. arcpy.management.Delete reports
+    # "Succeeded" even when the GDB folder is still on disk (e.g. when
+    # OneDrive sync holds a lock), which then makes CreateFileGDB fail
+    # with ERROR 000258. Belt-and-suspenders: try arcpy first, then
+    # force-remove the folder at the OS level if it survived.
     if arcpy.Exists(out_gdb):
         print(f"[CHA] Deleting existing output GDB...")
-        arcpy.management.Delete(out_gdb)
+        try:
+            arcpy.management.Delete(out_gdb)
+        except Exception as exc:
+            print(f"[CHA] arcpy.Delete on {out_gdb} failed: {exc}")
+    if os.path.exists(out_gdb):
+        if not _rmtree_robust(out_gdb):
+            raise RuntimeError(
+                f"Could not remove existing output GDB {out_gdb}. "
+                f"Close any open ArcGIS Pro project that references it "
+                f"(or pause OneDrive sync) and re-run."
+            )
     print(f"[CHA] Creating output GDB: {out_gdb}")
     arcpy.management.CreateFileGDB(
         os.path.dirname(out_gdb), os.path.basename(out_gdb),

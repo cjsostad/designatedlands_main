@@ -105,7 +105,7 @@ Three of the 42 designation layers originate from **federal** jurisdiction (Nati
 
 ### Date-Based Change Detection
 
-A date-filter mode (`RECENT_ONLY = True`) restricts the analysis to designations established or modified within a specified time window, directly supporting the 180-day SARA reporting cycle. Each source row in the CSV defines a `date_filter_query` template (e.g., `ESTABLISHMENT_DATE >= '{start_date}'`) that is injected into the WFS CQL filter at download time. Sources without a date-filterable attribute (noted as *"no date field available"* or *"non-BCGW source"*) are excluded from date-filtered runs. The date window is set using `START_DATE` and `END_DATE` in `main.py`. An xlsx report is generated summarising the changes, excluded layers, feature counts, and pipeline options used.
+A date-filter mode restricts the analysis to designations established or modified within a specified time window, directly supporting the 180-day SARA reporting cycle. The filter is **off by default** and turns on whenever `START_DATE` is set to a non-empty ISO date in `main.py`'s PIPELINE OPTIONS block. Each source row in the CSV defines a `date_filter_query` template (e.g., `ESTABLISHMENT_DATE >= '{start_date}'`) that is injected into the WFS CQL filter at download time. Sources without a date-filterable attribute (noted as *"no date field available"* or *"non-BCGW source"*) are excluded from date-filtered runs. The date window is set using `START_DATE` and `END_DATE` in `main.py`. An xlsx report is generated on every run summarising the changes (when applicable), excluded layers, feature counts, warnings/errors, pipeline options used, and a non-spatial dump of the CHA intersect tables.
 
 When the date filter is active, output feature class names are automatically suffixed with `_date_filter` (e.g., `designations_overlapping_date_filter`, `designations_planarized_date_filter`, `designations_planarized_date_filter_cha_03_20`) so that date-filtered outputs are immediately distinguishable from full-run outputs in the geodatabase. 
 
@@ -138,7 +138,7 @@ All processing is performed in **NAD 1983 BC Environment Albers (EPSG:3005)**, t
 
 - **BC Geographic Warehouse (BCGW)**: Most designation layers are downloaded automatically via the province's public WFS endpoint (`https://openmaps.gov.bc.ca/geo/pub/wfs`). The pipeline resolves BC Data Catalogue URLs to WFS layer names and fetches GeoJSON features with optional CQL query filters.
 - **Manual downloads**: A few sources (e.g., private conservation lands) are not available via WFS. These are placed in the `source_data/` folder and referenced from the CSV.
-- **Critical Habitat Area**: The Critical Habitat Area dataset is sourced from ECCC's national Critical Habitat of Species at Risk in Canada data portal. The pipeline downloads CriticalHabitat.zip directly from the ECCC open data API at runtime and extracts and renames the GDB to `CriticalHabitat_eccc_src.gdb` in `source_data/`. Any leftover hash-named extraction folders are removed automatically. If the download fails, the pipeline falls back to an existing local `CriticalHabitat_eccc_src.gdb` (or the legacy `CriticalHabitat.gdb`) in `source_data/` if one is present — allowing the pipeline to proceed using a manually downloaded copy. If neither is available, the pipeline will raise an error with instructions to download the zip manually.
+- **Critical Habitat Area**: The Critical Habitat Area dataset is sourced from ECCC's national Critical Habitat of Species at Risk in Canada data portal. The pipeline downloads `CriticalHabitat.zip` directly from the ECCC open data API at runtime, extracts it into a temporary sibling directory, validates the extracted geodatabase actually contains feature classes, and then atomically moves it into `source_data/CriticalHabitat.gdb`. The geodatabase is stored under ONE canonical name (`CriticalHabitat.gdb`) for the lifetime of the project — there is no rename to a second filename. If the download fails, the pipeline falls back to an existing local `source_data/CriticalHabitat.gdb` only if it contains feature classes; stale empty geodatabases are rejected and removed. If neither succeeds, the pipeline raises an error with instructions to manually drop `CriticalHabitat.gdb` directly into `source_data/`.
 Filtering
 The national CHA dataset covers all of Canada and all species. The pipeline applies a definition query to filter to the relevant subset before exporting to a local feature class. The default filter applied is:
 RD_Status IN (1) 
@@ -158,7 +158,7 @@ Remove Wide Ranging Species — a defined list of wide-ranging species is exclud
 The species exclusion list is controlled by the CHA_FILTER_OUT_WRS flag in main.py. When set to True, the full filter above is applied. When set to False, only the FINAL status and BC filters are applied and all species are included — useful for testing or when a full species coverage run is required.
 
 **Output**
-Before export, the pipeline stamps the original ECCC `OBJECTID` of each feature into a new attribute field called `CHA_Source_ID`. The filtered features are then exported to a new local feature class at `source_data/cha_exported.gdb/critical_habitat_area` using FeatureClassToFeatureClass. Although ArcGIS reassigns OBJECTIDs sequentially during export, `CHA_Source_ID` survives as a regular field and flows through all subsequent intersection outputs. `CHA_Source_ID` can be joined directly to `OBJECTID` in the raw ECCC `CriticalHabitat_eccc_src.gdb` in `source_data/` to trace any output row back to the source national polygon.
+Before export, the pipeline stamps the original ECCC `OBJECTID` of each feature into a new attribute field called `CHA_Source_ID`. The filtered features are then exported to a new local feature class at `source_data/cha_exported.gdb/critical_habitat_area` using FeatureClassToFeatureClass. Although ArcGIS reassigns OBJECTIDs sequentially during export, `CHA_Source_ID` survives as a regular field and flows through all subsequent intersection outputs. `CHA_Source_ID` can be joined directly to `OBJECTID` in the raw ECCC `CriticalHabitat.gdb` in `source_data/` to trace any output row back to the source national polygon.
 
 ### Federal exclusion
 
@@ -381,9 +381,12 @@ needed.
 # =================================================================
 # PIPELINE OPTIONS  —  Edit these directly, then hit Run in VS Code
 # =================================================================
-RECENT_ONLY        = True           # True = only process features new/modified in date window
-START_DATE         = "2025-04-01"   # Start of date window (YYYY-MM-DD)
-END_DATE           = None           # End of date window (None = today)
+# START_DATE: "" (empty string) = no date filter (process full datasets).
+#             "YYYY-MM-DD"      = filter active; only features
+#                                 added/modified in the window are kept.
+# END_DATE:   "" with a populated START_DATE defaults to today.
+START_DATE         = "2025-04-01"   # Start of date window (YYYY-MM-DD) or "" for no filter
+END_DATE           = "2026-04-01"   # End of date window (YYYY-MM-DD) or "" for today
 EXCLUDE_FEDERAL    = True           # Exclude National Parks, NWAs, Migratory Bird Sanctuaries
 SKIP_DOWNLOAD      = False          # True = skip WFS download (use existing data in GDB)
 SKIP_CLEANUP       = False          # True = keep intermediate feature classes
@@ -395,9 +398,8 @@ CHA_FILTER_OUT_WRS = False          # True = full CHA filter (FINAL + BC + exclu
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `RECENT_ONLY` | bool | `True` | When `True`, restricts the analysis to designation features that were established or modified within the date window defined by `START_DATE` and `END_DATE`. Each source in `sources_designations.csv` must have a `date_filter_query` entry for its features to be included in a date-filtered run — sources without a date-filterable field are excluded. All output names are suffixed with `_date_filter`. When `False`, the full dataset is downloaded with no date restriction. |
-| `START_DATE` | str | `"2025-04-01"` | The start of the date filter window, in `YYYY-MM-DD` format. Only used when `RECENT_ONLY = True`. Set this to the end date of the previous SARA 180-day report to capture all changes since the last submission. |
-| `END_DATE` | str or None | `None` | The end of the date filter window, in `YYYY-MM-DD` format. When set to `None`, defaults to today's date at runtime. Only used when `RECENT_ONLY = True`. |
+| `START_DATE` | str | `""` | The start of the date filter window, in `YYYY-MM-DD` format. **This is the single switch that turns the date filter on or off.** Leave as `""` (empty string) to process the full dataset with no date restriction. Set to a valid ISO date to enable date filtering — only designation features established or modified between `START_DATE` and `END_DATE` are downloaded and processed, and all output feature class names are suffixed with `_date_filter`. Each source in `sources_designations.csv` must have a `date_filter_query` entry for its features to be included in a date-filtered run — sources without a date-filterable field are excluded. Set this to the end date of the previous SARA 180-day report to capture all changes since the last submission. |
+| `END_DATE` | str | `""` | The end of the date filter window, in `YYYY-MM-DD` format. Only used when `START_DATE` is set. When `START_DATE` is set and `END_DATE` is `""`, defaults to today's date at runtime. |
 | `EXCLUDE_FEDERAL` | bool | `True` | When `True`, omits the three federal designation layers — National Parks (process_order 1), National Wildlife Areas (process_order 10), and Migratory Bird Sanctuaries (process_order 12) — from all pipeline steps. These layers originate from federal repositories with different update cycles and are excluded by default because the analysis focuses on provincially-managed lands. Set to `False` to include federal designations. |
 | `SKIP_DOWNLOAD` | bool | `False` | When `True`, skips the WFS download step entirely and uses whatever `src_*` feature classes are already present in the working GDB (`designatedlands.gdb`). Useful when re-running processing steps after a completed download, or when testing changes to the vector processing logic without waiting for a fresh download. |
 | `SKIP_CLEANUP` | bool | `False` | When `True`, retains all intermediate feature classes (`src_*` raw downloads and `*_pp` preprocessed versions) in the working GDB after the pipeline completes. Useful for inspecting intermediate outputs or debugging a processing issue. When `False`, these are deleted at Step 7 to reclaim disk space. |
@@ -468,7 +470,7 @@ Defines all 42 designation layers. Each row configures one data source. Key colu
 | **url** | BC Data Catalogue URL or direct download URL. |
 | **bcgw_layer_name** | BCGW WFS layer name (if different from catalogue-resolved name). |
 | **query** | CQL filter for WFS requests (e.g., `PARK_CLASS <> 'REC'`). |
-| **date_filter_query** | CQL query with `{start_date}` / `{end_date}` placeholders used when `RECENT_ONLY = True`. |
+| **date_filter_query** | CQL query with `{start_date}` / `{end_date}` placeholders used when the date filter is active (i.e., when `START_DATE` is set in `main.py`). |
 | **preprocess_operation** | `clip` or `union` (dissolve). |
 | **preprocess_args** | Arguments for preprocessing (clip boundary FC or dissolve columns). |
 
@@ -493,7 +495,7 @@ Defines 7 supporting layers used during processing (not designation layers thems
 
 ```
 ├── main.py                          # Full pipeline runner (recommended entry point)
-├── pipeline_reset.py                # Pre-run GDB cleanup utility — delete stale FCs before changing RECENT_ONLY or date settings
+├── pipeline_reset.py                # Pre-run GDB cleanup utility — delete stale FCs before changing date filter settings (toggling START_DATE on/off or changing the date window)
 ├── designatedlands.py               # Core DesignatedLands class and geoprocessing logic
 ├── date_filter.py                   # Date-based filtering and xlsx report generation
 ├── create_cha.py                    # Download and prepare the CHA dataset from ECCC
@@ -592,7 +594,7 @@ Downloads and prepares the **Critical Habitat Area (CHA)** dataset from ECCC's n
 - Reads the CHA entry from `sources_supporting.csv` (URL, definition query, field mappings).
 - Downloads `CriticalHabitat.zip` with retry logic (up to 3 attempts) and extracts the geodatabase into `source_data/`.
 - Applies the definition query to filter to **FINAL** status, **British Columbia** province, and (by default) excludes specified species. When called with `query_override`, uses the provided query instead of the CSV-defined one.
-- After a successful download, renames the extracted GDB from `CriticalHabitat.gdb` to `CriticalHabitat_eccc_src.gdb` and removes any leftover hash-named extraction folders from `source_data/`. Falls back to an existing local `CriticalHabitat_eccc_src.gdb` (or the legacy `CriticalHabitat.gdb`) if all download attempts fail.
+- Extracts the zip into a temporary sibling directory, validates that the extracted geodatabase contains feature classes, and atomically moves it into `source_data/CriticalHabitat.gdb`. The geodatabase is stored under ONE canonical name (`CriticalHabitat.gdb`) — no rename to a second filename. If all download attempts fail, falls back to an existing local `source_data/CriticalHabitat.gdb` only if it contains feature classes; stale empty geodatabases are rejected.
 
 Can be run standalone (`python create_cha.py`) or called from the pipeline via `prepare_cha()`.
 
@@ -630,7 +632,7 @@ Run before production pipeline executions to catch broken or outdated CQL querie
 
 The `dump` step writes two feature classes to `outputs/designatedlands_output.gdb`:
 
-> **Naming convention:** When the date filter is active (`RECENT_ONLY = True`), all output names are suffixed with `_date_filter` (e.g., `designations_overlapping_date_filter`, `designations_planarized_date_filter`). This ensures date-filtered outputs are immediately distinguishable from full-run outputs when both exist in the same geodatabase.
+> **Naming convention:** When the date filter is active (i.e., `START_DATE` is set in `main.py`), all output names are suffixed with `_date_filter` (e.g., `designations_overlapping_date_filter`, `designations_planarized_date_filter`). This ensures date-filtered outputs are immediately distinguishable from full-run outputs when both exist in the same geodatabase.
 
 ### `designations_overlapping`
 
@@ -714,7 +716,7 @@ To trace a row back to its source polygon, join `CHA_Source_ID` to `OBJECTID` in
 
 ### Example output contents (verified run: 2026-03-24)
 
-For the run logged in `logs/designatedlands_20260324_192326.log` (`recent_only=True`, federal layers excluded), the output geodatabase `outputs/designatedlands_output.gdb` contained the following objects:
+For the run logged in `logs/designatedlands_20260324_192326.log` (date filter active, federal layers excluded), the output geodatabase `outputs/designatedlands_output.gdb` contained the following objects:
 
 **Feature classes**
 

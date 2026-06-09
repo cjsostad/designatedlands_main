@@ -382,6 +382,11 @@ def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
     title_font = Font(bold=True, size=14)
     subtitle_font = Font(bold=True, size=11, color="4472C4")
 
+    # Determine the date-filter mode from the summary dict — controls
+    # whether the Changes/Excluded sheets render real data or a
+    # "no date filter set" placeholder row.
+    date_filter_active = bool(summary.get("date_filter_active", True))
+
     # ==================== Changes sheet ====================
     ws = wb.active
     ws.title = "Changes"
@@ -389,7 +394,10 @@ def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
     # Title rows
     ws.append(["Designated Lands — Pipeline Report"])
     ws["A1"].font = title_font
-    ws.append([f"Date window: {summary['start_date']}  to  {summary['end_date']}"])
+    if date_filter_active:
+        ws.append([f"Date window: {summary['start_date']}  to  {summary['end_date']}"])
+    else:
+        ws.append(["Date window: NONE (full dataset)"])
     ws["A2"].font = subtitle_font
     ws.append([])  # blank row
 
@@ -402,14 +410,21 @@ def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
         cell.fill = header_fill
         cell.alignment = header_align
 
-    # Data rows
-    for row in change_rows:
+    if not date_filter_active:
         ws.append([
-            row["layer_name"],
-            row["feature_name"],
-            row["status"],
-            row["date_of_change"],
+            "No date filter set — no per-feature change list to display.",
+            "", "", "",
         ])
+        ws.cell(row=ws.max_row, column=1).font = Font(italic=True)
+    else:
+        # Data rows
+        for row in change_rows:
+            ws.append([
+                row["layer_name"],
+                row["feature_name"],
+                row["status"],
+                row["date_of_change"],
+            ])
 
     # Auto-fit column widths (approximate)
     col_widths = [45, 60, 28, 16]
@@ -431,41 +446,144 @@ def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
         cell.font = header_font
         cell.fill = header_fill
         cell.alignment = header_align
-    for entry in excluded_entries:
-        ws2.append([entry["name"], entry["exclude_reason"] or "unknown"])
+    if not date_filter_active:
+        ws2.append([
+            "No date filter set — no layers excluded by date filter.",
+            "",
+        ])
+        ws2.cell(row=ws2.max_row, column=1).font = Font(italic=True)
+    else:
+        for entry in excluded_entries:
+            ws2.append([entry["name"], entry["exclude_reason"] or "unknown"])
+    # Always list federal exclusions on this sheet (date-independent).
+    if federal_excluded:
+        ws2.append([])
+        ws2.append([f"Federal layers excluded ({len(federal_excluded)}):", ""])
+        ws2.cell(row=ws2.max_row, column=1).font = subtitle_font
+        for fed in federal_excluded:
+            ws2.append([fed["name"], fed.get("designation", "")])
     ws2.column_dimensions["A"].width = 55
     ws2.column_dimensions["B"].width = 35
 
-    # ==================== Summary sheet ====================
+    # ==================== Summary sheet (dashboard) ====================
     ws3 = wb.create_sheet("Summary")
-    ws3.append(["Designated Lands — Summary"])
+    ws3.append(["Designated Lands — Run Summary"])
     ws3["A1"].font = title_font
     ws3.append([])
-    summary_rows = [
-        ("Date window", f"{summary['start_date']}  to  {summary['end_date']}"),
-        ("Total datasets", summary["total_datasets"]),
-        ("Date-filtered", summary["date_filtered"]),
-        ("Excluded (no date filter)", summary["excluded"]),
+
+    opts = pipeline_options or {}
+    na_value = "—"  # used when a stat does not apply to this run mode
+
+    # --- Run metadata ---
+    ws3.append(["Run Information"])
+    ws3.cell(row=ws3.max_row, column=1).font = subtitle_font
+    meta_rows = [
+        ("Run timestamp", opts.get("run_timestamp", "")),
     ]
-    if federal_excluded:
-        summary_rows.append(
-            ("Excluded (federal)", len(federal_excluded))
-        )
-    summary_rows += [
-        ("Layers with changes", summary["layers_with_changes"]),
-        ("Layers with no changes", summary["layers_no_changes"]),
-        ("Total features changed", summary["total_features_changed"]),
-    ]
-    if summary.get("errors"):
-        summary_rows.append(("Errors", len(summary["errors"])))
-        for e in summary["errors"]:
-            summary_rows.append(("", f"  - {e}"))
-    for label, value in summary_rows:
+    for label, value in meta_rows:
         ws3.append([label, value])
-        if label:
+        ws3.cell(row=ws3.max_row, column=1).font = Font(bold=True)
+
+    ws3.append([])
+
+    # --- Pipeline options snapshot ---
+    ws3.append(["Pipeline Options Used For This Run"])
+    ws3.cell(row=ws3.max_row, column=1).font = subtitle_font
+    option_rows = [
+        ("Date filter",
+         f"{opts.get('start_date', '')}  →  {opts.get('end_date', '')}"
+         if date_filter_active else "OFF (full dataset)"),
+        ("START_DATE", opts.get("start_date", "") or "(none)"),
+        ("END_DATE", opts.get("end_date", "") or "(none)"),
+        ("EXCLUDE_FEDERAL", "Yes" if opts.get("exclude_federal") else "No"),
+        ("SKIP_DOWNLOAD", "Yes" if opts.get("skip_download") else "No"),
+        ("SKIP_CLEANUP", "Yes" if opts.get("skip_cleanup") else "No"),
+        ("RASTER", "Yes" if opts.get("raster") else "No"),
+        ("CHA_FILTER_OUT_WRS", "Yes" if opts.get("cha_filter_out_wrs") else "No"),
+        ("CHA_REPORT_ROW_LIMIT", opts.get("cha_report_row_limit", "")),
+    ]
+    for label, value in option_rows:
+        ws3.append([label, value])
+        ws3.cell(row=ws3.max_row, column=1).font = Font(bold=True)
+
+    ws3.append([])
+
+    # --- Dataset tallies ---
+    ws3.append(["Dataset Tallies"])
+    ws3.cell(row=ws3.max_row, column=1).font = subtitle_font
+    tally_rows = [
+        ("Total datasets", summary["total_datasets"]),
+        ("Date-filtered", summary["date_filtered"] if date_filter_active else na_value),
+        ("Excluded (no date field)", summary["excluded"] if date_filter_active else na_value),
+        ("Excluded (federal)", len(federal_excluded) if federal_excluded else 0),
+        ("Layers with changes",
+         summary["layers_with_changes"] if date_filter_active else na_value),
+        ("Layers with no changes",
+         summary["layers_no_changes"] if date_filter_active else na_value),
+        ("Total features changed",
+         summary["total_features_changed"] if date_filter_active else na_value),
+    ]
+    for label, value in tally_rows:
+        ws3.append([label, value])
+        ws3.cell(row=ws3.max_row, column=1).font = Font(bold=True)
+
+    ws3.append([])
+
+    # --- CHA result counts (if present) ---
+    cha_planarized_total = opts.get("cha_planarized_total_rows")
+    cha_overlapping_total = opts.get("cha_overlapping_total_rows")
+    if cha_planarized_total is not None or cha_overlapping_total is not None:
+        ws3.append(["CHA Intersection Results"])
+        ws3.cell(row=ws3.max_row, column=1).font = subtitle_font
+        cha_rows = [
+            ("CHA × Planarized features",
+             cha_planarized_total if cha_planarized_total is not None else na_value),
+            ("CHA × Overlapping features",
+             cha_overlapping_total if cha_overlapping_total is not None else na_value),
+        ]
+        if opts.get("cha_planarized_truncated"):
+            cha_rows.append((
+                "CHA Planarized sheet truncated",
+                f"Yes — first {opts.get('cha_report_row_limit', '')} of {cha_planarized_total} rows shown",
+            ))
+        if opts.get("cha_overlapping_truncated"):
+            cha_rows.append((
+                "CHA Overlapping sheet truncated",
+                f"Yes — first {opts.get('cha_report_row_limit', '')} of {cha_overlapping_total} rows shown",
+            ))
+        for label, value in cha_rows:
+            ws3.append([label, value])
             ws3.cell(row=ws3.max_row, column=1).font = Font(bold=True)
-    ws3.column_dimensions["A"].width = 30
-    ws3.column_dimensions["B"].width = 50
+
+        ws3.append([])
+
+    # --- Warnings & errors collected during the pipeline run ---
+    ws3.append(["Warnings & Errors"])
+    ws3.cell(row=ws3.max_row, column=1).font = subtitle_font
+    run_messages = opts.get("run_messages") or []
+    # Also fold in WFS errors captured by run_report().
+    wfs_errors = summary.get("errors") or []
+    if not run_messages and not wfs_errors:
+        ws3.append(["", "No warnings or errors recorded for this run."])
+        ws3.cell(row=ws3.max_row, column=2).font = Font(italic=True)
+    else:
+        ws3.append(["Level", "Message"])
+        hdr_row = ws3.max_row
+        for col_idx in (1, 2):
+            cell = ws3.cell(row=hdr_row, column=col_idx)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_align
+        for msg in run_messages:
+            ws3.append([
+                msg.get("level", ""),
+                f"[{msg.get('logger', '')}] {msg.get('message', '')}",
+            ])
+        for e in wfs_errors:
+            ws3.append(["WFS_ERROR", str(e)])
+
+    ws3.column_dimensions["A"].width = 32
+    ws3.column_dimensions["B"].width = 90
 
     # ==================== Pipeline Options sheet ====================
     ws4 = wb.create_sheet("Pipeline Options")
@@ -476,7 +594,7 @@ def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
     opts = pipeline_options or {}
     option_rows = [
         ("Date filter — only new/modified designations",
-         "Enabled" if opts.get("recent_only") else "Disabled (full dataset)"),
+         "Enabled" if opts.get("date_filter_active") else "Disabled (full dataset)"),
         ("Start date", opts.get("start_date", summary.get("start_date", ""))),
         ("End date", opts.get("end_date", summary.get("end_date", ""))),
         ("Exclude federal layers",
@@ -610,6 +728,52 @@ def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
     ws5.freeze_panes = "A2"
     ws5.auto_filter.ref = f"A1:G{len(src_rows) + 1}"
 
+    # ==================== CHA result sheets ====================
+    # Non-spatial dumps of the two CHA intersection feature classes so the
+    # workbook is a self-contained audit trail of the run's CHA outputs.
+    def _append_cha_sheet(sheet_name, rows, field_names, total_rows, truncated):
+        if not rows or not field_names:
+            return
+        ws_cha = wb.create_sheet(sheet_name)
+        ws_cha.append(list(field_names))
+        for col_idx in range(1, len(field_names) + 1):
+            cell = ws_cha.cell(row=1, column=col_idx)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_align
+        for r in rows:
+            ws_cha.append([r.get(fn, "") for fn in field_names])
+        if truncated:
+            ws_cha.append([])
+            limit = (pipeline_options or {}).get("cha_report_row_limit", len(rows))
+            banner = (
+                f"Showing first {limit:,} of {total_rows:,} rows \u2014 "
+                f"full table is in the output geodatabase."
+            )
+            ws_cha.append([banner])
+            ws_cha.cell(row=ws_cha.max_row, column=1).font = Font(italic=True, bold=True)
+        ws_cha.freeze_panes = "A2"
+        for col_idx in range(1, len(field_names) + 1):
+            ws_cha.column_dimensions[
+                ws_cha.cell(row=1, column=col_idx).column_letter
+            ].width = 22
+
+    opts_cha = pipeline_options or {}
+    _append_cha_sheet(
+        "CHA Planarized",
+        opts_cha.get("cha_planarized_rows"),
+        opts_cha.get("cha_planarized_field_names"),
+        opts_cha.get("cha_planarized_total_rows", 0),
+        opts_cha.get("cha_planarized_truncated", False),
+    )
+    _append_cha_sheet(
+        "CHA Overlapping",
+        opts_cha.get("cha_overlapping_rows"),
+        opts_cha.get("cha_overlapping_field_names"),
+        opts_cha.get("cha_overlapping_total_rows", 0),
+        opts_cha.get("cha_overlapping_truncated", False),
+    )
+
     wb.save(out_path)
     return out_path
 
@@ -678,6 +842,16 @@ def run_report(start_date, end_date, test_wfs=False, xlsx_path=None,
     included = [f for f in filters if f["included"]]
     excluded = [f for f in filters if not f["included"]]
 
+    # Determine whether the date filter is active for this run. When False
+    # (analyst ran the full pipeline with no START_DATE), we skip every
+    # WFS "what changed?" query — the corresponding sheets in the xlsx
+    # report will render placeholder messages instead.
+    if pipeline_options is not None and "date_filter_active" in pipeline_options:
+        date_filter_active = bool(pipeline_options.get("date_filter_active"))
+    else:
+        # Standalone CLI invocation always implies a date window.
+        date_filter_active = True
+
     # Handle federal exclusion in standalone mode
     if federal_excluded is None:
         federal_excluded = []
@@ -712,91 +886,94 @@ def run_report(start_date, end_date, test_wfs=False, xlsx_path=None,
     errors = []
     change_rows = []  # collected for xlsx
 
-    for entry in included:
-        layer = entry["bcgw_layer_name"]
-        if not layer:
-            continue
+    if not date_filter_active:
+        print(f"\n  No date filter set — skipping per-feature WFS change queries.\n")
+    else:
+        for entry in included:
+            layer = entry["bcgw_layer_name"]
+            if not layer:
+                continue
 
-        desig = entry["designation"]
-        info = source_info.get(desig, {})
-        existing_q = info.get("query", "")
-        name_col = info.get("source_name_col", "")
-        template = info.get("date_filter_query", "")
+            desig = entry["designation"]
+            info = source_info.get(desig, {})
+            existing_q = info.get("query", "")
+            name_col = info.get("source_name_col", "")
+            template = info.get("date_filter_query", "")
 
-        # Build combined CQL
-        combined = apply_date_filter_to_query(existing_q, entry["date_filter_cql"])
+            # Build combined CQL
+            combined = apply_date_filter_to_query(existing_q, entry["date_filter_cql"])
 
-        # Extract which date fields this layer uses
-        date_fields = _extract_date_fields_from_template(template)
+            # Extract which date fields this layer uses
+            date_fields = _extract_date_fields_from_template(template)
 
-        if test_wfs:
-            # Quick validation only
-            status, count = _count_features(layer, combined)
-            if status == 200:
-                print(f"\n  {entry['name']}: {count} features matched (CQL OK)")
-            else:
-                print(f"\n  {entry['name']}: FAILED ({status}) — {count}")
+            if test_wfs:
+                # Quick validation only
+                status, count = _count_features(layer, combined)
+                if status == 200:
+                    print(f"\n  {entry['name']}: {count} features matched (CQL OK)")
+                else:
+                    print(f"\n  {entry['name']}: FAILED ({status}) — {count}")
+                    errors.append(entry["name"])
+                continue
+
+            # Full query — get actual features
+            print(f"\n  {'—' * 96}")
+            print(f"  {entry['name']}")
+            print(f"  {'—' * 96}")
+
+            status, result = _query_features(layer, combined)
+
+            if status != 200:
+                print(f"    ERROR querying WFS: {result}")
                 errors.append(entry["name"])
-            continue
+                continue
 
-        # Full query — get actual features
-        print(f"\n  {'—' * 96}")
-        print(f"  {entry['name']}")
-        print(f"  {'—' * 96}")
+            if not result:
+                print(f"    No changes found in this date window.")
+                layers_no_changes += 1
+                continue
 
-        status, result = _query_features(layer, combined)
+            layers_with_changes += 1
 
-        if status != 200:
-            print(f"    ERROR querying WFS: {result}")
-            errors.append(entry["name"])
-            continue
+            # Print header
+            print(f"  {'Feature Name':<55} {'Status':<25} {'Date of Change':<14}")
+            print(f"  {'·' * 55} {'·' * 25} {'·' * 14}")
 
-        if not result:
-            print(f"    No changes found in this date window.")
-            layers_no_changes += 1
-            continue
+            feat_counter = 0
+            for props in result:
+                feat_counter += 1
+                # Get feature name
+                feature_name = ""
+                if name_col:
+                    feature_name = str(props.get(name_col, "") or "")
+                if not feature_name:
+                    # Fallback: try common name fields
+                    for fallback in ("NAME", "PROTECTED_LANDS_NAME", "SITE_NAME",
+                                     "DESIGNATED_AREA_NAME", "PROJECT_NAME"):
+                        feature_name = str(props.get(fallback, "") or "")
+                        if feature_name:
+                            break
+                if not feature_name:
+                    # Build a descriptive name from layer-specific identifier fields
+                    feature_name = _build_fallback_name(props, entry["name"], feat_counter)
 
-        layers_with_changes += 1
+                # Determine status and date
+                change_status, raw_date = _determine_status_and_date(
+                    props, date_fields, start_date,
+                )
+                display_date = _format_date(raw_date)
 
-        # Print header
-        print(f"  {'Feature Name':<55} {'Status':<25} {'Date of Change':<14}")
-        print(f"  {'·' * 55} {'·' * 25} {'·' * 14}")
+                # Truncate long names for display
+                display_name = feature_name[:54]
+                print(f"  {display_name:<55} {change_status:<25} {display_date:<14}")
+                total_changes += 1
 
-        feat_counter = 0
-        for props in result:
-            feat_counter += 1
-            # Get feature name
-            feature_name = ""
-            if name_col:
-                feature_name = str(props.get(name_col, "") or "")
-            if not feature_name:
-                # Fallback: try common name fields
-                for fallback in ("NAME", "PROTECTED_LANDS_NAME", "SITE_NAME",
-                                 "DESIGNATED_AREA_NAME", "PROJECT_NAME"):
-                    feature_name = str(props.get(fallback, "") or "")
-                    if feature_name:
-                        break
-            if not feature_name:
-                # Build a descriptive name from layer-specific identifier fields
-                feature_name = _build_fallback_name(props, entry["name"], feat_counter)
-
-            # Determine status and date
-            change_status, raw_date = _determine_status_and_date(
-                props, date_fields, start_date,
-            )
-            display_date = _format_date(raw_date)
-
-            # Truncate long names for display
-            display_name = feature_name[:54]
-            print(f"  {display_name:<55} {change_status:<25} {display_date:<14}")
-            total_changes += 1
-
-            change_rows.append({
-                "layer_name": entry["name"],
-                "feature_name": feature_name,
-                "status": change_status,
-                "date_of_change": display_date,
-            })
+                change_rows.append({
+                    "layer_name": entry["name"],
+                    "feature_name": feature_name,
+                    "status": change_status,
+                    "date_of_change": display_date,
+                })
 
     # --- Excluded layers ---
     print(f"\n  {'=' * 96}")
@@ -836,7 +1013,7 @@ def run_report(start_date, end_date, test_wfs=False, xlsx_path=None,
     if xlsx_path and not test_wfs:
         if pipeline_options is None:
             pipeline_options = {
-                "recent_only": True,
+                "date_filter_active": True,
                 "exclude_federal": exclude_federal,
                 "start_date": start_date,
                 "end_date": end_date,
@@ -844,6 +1021,7 @@ def run_report(start_date, end_date, test_wfs=False, xlsx_path=None,
         summary = {
             "start_date": start_date,
             "end_date": end_date,
+            "date_filter_active": date_filter_active,
             "total_datasets": len(filters),
             "date_filtered": len(included),
             "excluded": len(excluded),

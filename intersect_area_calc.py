@@ -31,6 +31,8 @@ def run_cha_intersection(
     output_gdb,
     planarized_out_name="designations_planarized_cha",
     overlapping_out_name="designations_overlapping_cha",
+    return_rows=False,
+    row_limit=None,
 ):
     """
     Intersect designation layers with CHA and calculate overlap percentages.
@@ -49,12 +51,25 @@ def run_cha_intersection(
         Name for the planarized intersect output feature class.
     overlapping_out_name : str
         Name for the overlapping intersect output feature class.
+    return_rows : bool
+        If True, after the intersects are written, read the two output
+        feature classes (excluding geometry) into lists of dicts and
+        include them in the return value. Used by the pipeline xlsx
+        report so the analyst does not need to open the GDB to inspect
+        the result tables.
+    row_limit : int or None
+        When ``return_rows`` is True, cap each table at this many rows.
+        ``None`` returns all rows. The returned dict reports both the
+        actual count and whether the result was truncated.
 
     Returns
     -------
     dict
-        Paths to the created outputs: planarized_intersect,
-        overlapping_intersect.
+        Always contains ``planarized_intersect`` and ``overlapping_intersect``
+        paths. When ``return_rows`` is True, also contains:
+          - planarized_rows, overlapping_rows : list[dict]
+          - planarized_total_rows, overlapping_total_rows : int
+          - planarized_truncated, overlapping_truncated : bool
     """
 
     # --------------------------------------------------
@@ -260,10 +275,40 @@ def run_cha_intersection(
 
     LOG.info("CHA intersection complete - results in %s", output_gdb)
 
-    return {
+    result = {
         "planarized_intersect": planarized_intersect,
         "overlapping_intersect": overlapping_intersect,
     }
+
+    if return_rows:
+        for key_prefix, fc_path in [
+            ("planarized", planarized_intersect),
+            ("overlapping", overlapping_intersect),
+        ]:
+            total = int(arcpy.management.GetCount(fc_path)[0])
+            field_names = [
+                f.name for f in arcpy.ListFields(fc_path)
+                if f.type not in ("Geometry", "Blob", "Raster")
+                and f.name.upper() not in ("SHAPE", "SHAPE_LENGTH", "SHAPE_AREA")
+            ]
+            rows = []
+            limit = row_limit if row_limit is not None else total
+            with arcpy.da.SearchCursor(fc_path, field_names) as cursor:
+                for i, row in enumerate(cursor):
+                    if i >= limit:
+                        break
+                    rows.append(dict(zip(field_names, row)))
+            truncated = total > len(rows)
+            result[f"{key_prefix}_rows"] = rows
+            result[f"{key_prefix}_field_names"] = field_names
+            result[f"{key_prefix}_total_rows"] = total
+            result[f"{key_prefix}_truncated"] = truncated
+            LOG.info(
+                "CHA report rows captured for %s: %d of %d (truncated=%s)",
+                key_prefix, len(rows), total, truncated,
+            )
+
+    return result
 
 
 # --------------------------------------------------

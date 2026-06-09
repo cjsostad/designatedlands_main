@@ -34,8 +34,9 @@ Pipeline steps:
                         from the working GDB to free disk space.
 
 Defaults (can be run with no arguments from VS Code):
-  - Date filtering is ON by default — only features added/modified
-    between START_DATE and END_DATE are downloaded and processed.
+  - Date filtering is OFF by default. Set START_DATE to a valid ISO date
+    (YYYY-MM-DD) in the PIPELINE OPTIONS block to enable filtering;
+    leave it as "" to run the full dataset.
   - Federal layers (National Parks, National Wildlife Areas, Migratory
     Bird Sanctuaries) are excluded by default.
   - Raster processing is off by default (no Spatial Analyst license).
@@ -62,6 +63,10 @@ from date_filter import run_report
 from gdb_utils import ensure_file_gdb
 
 
+# Max rows written to each CHA result sheet in the xlsx report.
+# If a CHA intersect FC has more rows than this, only the first N are
+# written and a banner row points back to the GDB for the full table.
+CHA_REPORT_ROW_LIMIT = 50_000
 
 LOG = logging.getLogger(__name__)
 
@@ -91,21 +96,29 @@ def main():
     # =================================================================
 
     # If changing the date filter settings, run pipeline_reset.py before running main.py to clear out stale layers from the GDB so the next run downloads fresh data matching your new settings.
-    RECENT_ONLY    = False           # True = only process features new/modified in date window
-    START_DATE     = "2025-04-01"   # Start of date window (YYYY-MM-DD)
-    END_DATE       = "2026-04-01"           # End of date window (None = today)
+    # START_DATE: "" (empty string) = no date filter (process full datasets).
+    #             "YYYY-MM-DD"      = filter active; only features
+    #                                 added/modified in the window are kept.
+    # END_DATE:   "" with a populated START_DATE defaults to today.
+    START_DATE     = ""   # Start of date window (YYYY-MM-DD) or "" for no filter
+    END_DATE       = ""   # End of date window (YYYY-MM-DD) or "" for today
     EXCLUDE_FEDERAL = True          # Exclude National Parks, NWAs, Migratory Bird Sanctuaries
     SKIP_DOWNLOAD  = False          # True = skip WFS download (use existing data in GDB)
-    SKIP_CLEANUP   = True          # True = keep intermediate feature classes
+    SKIP_CLEANUP   = True           # True = keep intermediate feature classes
     RASTER         = False          # True = create raster outputs (requires Spatial Analyst)
-    CHA_FILTER_OUT_WRS = False       # True = full CHA filter (FINAL + BC + exclude species)
+    CHA_FILTER_OUT_WRS = False      # True = full CHA filter (FINAL + BC + exclude species)
                                     # False = minimal CHA filter (FINAL + BC only)
     # =================================================================
+
+    # Single source of truth for "is the date filter on?". Derived from
+    # the presence of START_DATE — replaces the previous separate
+    # RECENT_ONLY boolean.
+    date_filter_active = bool(START_DATE.strip())
 
     # Naming suffix: when a date filter is active, output FC names are
     # appended with "_date_filter" so filtered results are immediately
     # distinguishable from full-run outputs in the GDB.
-    dl_suffix = "_date_filter" if RECENT_ONLY else ""
+    dl_suffix = "_date_filter" if date_filter_active else ""
 
     # ---------------------------------
     # Get script directory
@@ -120,6 +133,24 @@ def main():
 
     LOG.info("Run log: %s", log_path)
 
+    # Capture any WARNING/ERROR records emitted during the run so they
+    # can be written into the xlsx report's Summary sheet.
+    run_messages = []
+
+    class _RunMessageCollector(logging.Handler):
+        def emit(self, record):
+            try:
+                run_messages.append({
+                    "level": record.levelname,
+                    "logger": record.name,
+                    "message": record.getMessage(),
+                })
+            except Exception:
+                pass
+
+    _msg_handler = _RunMessageCollector(level=logging.WARNING)
+    logging.getLogger().addHandler(_msg_handler)
+
     def run_step(step_name, func):
         try:
             func()
@@ -129,12 +160,15 @@ def main():
             LOG.exception("Step failed: %s", step_name)
             raise
 
+    if date_filter_active:
+        date_banner = f"{START_DATE}  →  {END_DATE or 'today'}"
+    else:
+        date_banner = "OFF (full dataset)"
+
     print("\n" + "=" * 70)
     print("  DESIGNATED LANDS PIPELINE")
     print("=" * 70)
-    print(f"  Date filter (recent only) : {RECENT_ONLY}")
-    print(f"  Start date                : {START_DATE}")
-    print(f"  End date                  : {END_DATE or 'today'}")
+    print(f"  Date filter               : {date_banner}")
     print(f"  Exclude federal layers    : {EXCLUDE_FEDERAL}")
     print(f"  Skip download             : {SKIP_DOWNLOAD}")
     print(f"  Skip cleanup              : {SKIP_CLEANUP}")
@@ -152,7 +186,6 @@ def main():
 
     DL = DesignatedLands(
         config_file=args.config,
-        recent_only=RECENT_ONLY,
         start_date=START_DATE,
         end_date=END_DATE,
         exclude_federal=EXCLUDE_FEDERAL,
@@ -184,7 +217,7 @@ def main():
         print("[Step 2/7] Downloading designation layers...")
         LOG.info("=== Step 2/7: download ===")
 
-        run_step("download", lambda: DL.download(overwrite=RECENT_ONLY))
+        run_step("download", lambda: DL.download(overwrite=date_filter_active))
 
         # ---------------------------------
         # Run create_cha.py
@@ -210,58 +243,6 @@ def main():
     else:
 
         print("[Step 2/7] Download SKIPPED (SKIP_DOWNLOAD=True).\n")
-
-    # ---------------------------------
-    # REPORT - Generate xlsx pipeline report
-    # ---------------------------------
-    # Produces an Excel workbook in outputs/ with a date-stamped filename
-    # with sheets:
-    #   - Changes: WFS features added/modified in the date window
-    #   - Excluded Layers: layers removed by date or federal filter
-    #   - Summary: counts per designation
-    #   - Pipeline Options: the flags used for this run + query filters
-    #   - Designation Categories: each designation mapped to a category
-
-    print("[Report] Generating pipeline report (xlsx)...")
-   
-    xlsx_path = os.path.join(
-        script_dir, "outputs", "designated_lands_pipeline_report.xlsx",
-    )
-
-    # Collect query filters from sources for the report
-    source_queries = []
-    for src in DL.sources:
-        source_queries.append({
-            "designation": src.get("designation", ""),
-            "name": src.get("name", ""),
-            "query": src.get("query", ""),
-        })
-    # Include supporting sources (e.g. Critical Habitat Area filter)
-    for src in DL.sources_supporting:
-        if src.get("query", "").strip():
-            source_queries.append({
-                "designation": src.get("designation", ""),
-                "name": src.get("name", ""),
-                "query": src.get("query", ""),
-            })
-
-    pipeline_options = {
-        "recent_only": DL.recent_only,
-        "exclude_federal": DL.exclude_federal,
-        "start_date": DL.start_date,
-        "end_date": DL.end_date,
-        "source_queries": source_queries,
-    }
-
-    written_report = run_report(
-        DL.start_date, DL.end_date,
-        xlsx_path=xlsx_path, avoid_overwrite=True,
-        exclude_federal=DL.exclude_federal,
-        federal_excluded=DL.federal_excluded_sources,
-        pipeline_options=pipeline_options,
-    )
-
-    print(f"[Report] Saved to {written_report}\n")
 
     # ---------------------------------
     # PRE-CHECK: verify all sources exist
@@ -331,16 +312,95 @@ def main():
     now = datetime.datetime.now()
     date_suffix = now.strftime("%m_%d")
 
-    run_cha_intersection(
+    cha_result = run_cha_intersection(
         cha_fc=cha_fc,
         planarized_fc=planarized_fc,
         overlapping_fc=overlapping_fc,
         output_gdb=output_gdb,
         planarized_out_name=f"designations_planarized{dl_suffix}_cha_{date_suffix}",
         overlapping_out_name=f"designations_overlapping{dl_suffix}_cha_{date_suffix}",
+        return_rows=True,
+        row_limit=CHA_REPORT_ROW_LIMIT,
     )
 
     print("[Step 4/7] CHA intersection and area calculation complete.")
+
+    # ---------------------------------
+    # REPORT - Generate xlsx pipeline report
+    # ---------------------------------
+    # Produces an Excel workbook in outputs/ with a date-stamped filename.
+    # Sheets:
+    #   - Changes: WFS features added/modified in the date window
+    #              (placeholder when no date filter is set)
+    #   - Excluded Layers: layers removed by date or federal filter
+    #                      (placeholder when no date filter is set)
+    #   - Summary: dashboard of all pipeline options + warnings/errors
+    #              + dataset counts
+    #   - Pipeline Options: federal exclusion list + per-layer query filters
+    #   - Designation Categories: each designation mapped to a category
+    #   - CHA Planarized / CHA Overlapping: non-spatial dumps of the two
+    #     CHA intersect tables (capped at CHA_REPORT_ROW_LIMIT rows each)
+
+    print("[Report] Generating pipeline report (xlsx)...")
+
+    xlsx_path = os.path.join(
+        script_dir, "outputs", "designated_lands_pipeline_report.xlsx",
+    )
+
+    # Collect query filters from sources for the report
+    source_queries = []
+    for src in DL.sources:
+        source_queries.append({
+            "designation": src.get("designation", ""),
+            "name": src.get("name", ""),
+            "query": src.get("query", ""),
+        })
+    for src in DL.sources_supporting:
+        if src.get("query", "").strip():
+            source_queries.append({
+                "designation": src.get("designation", ""),
+                "name": src.get("name", ""),
+                "query": src.get("query", ""),
+            })
+
+    pipeline_options = {
+        # Date-filter flag + window
+        "date_filter_active": DL.date_filter_active,
+        "start_date": DL.start_date,
+        "end_date": DL.end_date,
+        # Full snapshot of every PIPELINE OPTION flag from main.py
+        "exclude_federal": EXCLUDE_FEDERAL,
+        "skip_download": SKIP_DOWNLOAD,
+        "skip_cleanup": SKIP_CLEANUP,
+        "raster": RASTER,
+        "cha_filter_out_wrs": CHA_FILTER_OUT_WRS,
+        "cha_report_row_limit": CHA_REPORT_ROW_LIMIT,
+        # Per-layer query filter table (rendered on Pipeline Options sheet)
+        "source_queries": source_queries,
+        # Warnings/errors collected by _RunMessageCollector during this run
+        "run_messages": run_messages,
+        # Run timestamp
+        "run_timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        # CHA intersect tables (non-spatial dumps for the xlsx report)
+        "cha_planarized_rows": cha_result.get("planarized_rows"),
+        "cha_planarized_field_names": cha_result.get("planarized_field_names"),
+        "cha_planarized_total_rows": cha_result.get("planarized_total_rows"),
+        "cha_planarized_truncated": cha_result.get("planarized_truncated"),
+        "cha_overlapping_rows": cha_result.get("overlapping_rows"),
+        "cha_overlapping_field_names": cha_result.get("overlapping_field_names"),
+        "cha_overlapping_total_rows": cha_result.get("overlapping_total_rows"),
+        "cha_overlapping_truncated": cha_result.get("overlapping_truncated"),
+    }
+
+    written_report = run_report(
+        DL.start_date, DL.end_date,
+        xlsx_path=xlsx_path, avoid_overwrite=True,
+        exclude_federal=DL.exclude_federal,
+        federal_excluded=DL.federal_excluded_sources,
+        pipeline_options=pipeline_options,
+    )
+
+    print(f"[Report] Saved to {written_report}\n")
     # ---------------------------------
     # STEP 5
     # ---------------------------------
