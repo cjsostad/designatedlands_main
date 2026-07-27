@@ -66,7 +66,7 @@ from gdb_utils import ensure_file_gdb
 # Max rows written to each CHA result sheet in the xlsx report.
 # If a CHA intersect FC has more rows than this, only the first N are
 # written and a banner row points back to the GDB for the full table.
-CHA_REPORT_ROW_LIMIT = 50_000
+CHA_REPORT_ROW_LIMIT = 100_000
 
 LOG = logging.getLogger(__name__)
 
@@ -103,7 +103,9 @@ def main():
     START_DATE     = ""   # Start of date window (YYYY-MM-DD) or "" for no filter
     END_DATE       = ""   # End of date window (YYYY-MM-DD) or "" for today
     EXCLUDE_FEDERAL = True          # Exclude National Parks, NWAs, Migratory Bird Sanctuaries
-    SKIP_DOWNLOAD  = False          # True = skip WFS download (use existing data in GDB)
+    SKIP_DOWNLOAD  = True          # True = skip WFS download (use existing data in GDB)
+    SKIP_PREPROCESS = True         # True = skip preprocess + BC boundary (use existing pp layers)
+    SKIP_VECTOR    = True          # True = skip vector build (designations_overlapping/planarized already in GDB)
     SKIP_CLEANUP   = True           # True = keep intermediate feature classes
     RASTER         = False          # True = create raster outputs (requires Spatial Analyst)
     CHA_FILTER_OUT_WRS = False      # True = full CHA filter (FINAL + BC + exclude species)
@@ -171,6 +173,8 @@ def main():
     print(f"  Date filter               : {date_banner}")
     print(f"  Exclude federal layers    : {EXCLUDE_FEDERAL}")
     print(f"  Skip download             : {SKIP_DOWNLOAD}")
+    print(f"  Skip preprocess           : {SKIP_PREPROCESS}")
+    print(f"  Skip vector processing    : {SKIP_VECTOR}")
     print(f"  Skip cleanup              : {SKIP_CLEANUP}")
     print(f"  Raster processing         : {RASTER}")
     print(f"  CHA filter out WRS        : {CHA_FILTER_OUT_WRS}")
@@ -266,29 +270,41 @@ def main():
     # STEP 3
     # ---------------------------------
 
-    print("[Step 3/7] Preprocessing sources...")
+    if not SKIP_PREPROCESS:
 
-    LOG.info("=== Step 3/7: preprocess ===")
+        print("[Step 3/7] Preprocessing sources...")
 
-    run_step("preprocess", DL.preprocess)
+        LOG.info("=== Step 3/7: preprocess ===")
 
-    run_step("create-bc-boundary", DL.create_bc_boundary)
+        run_step("preprocess", DL.preprocess)
 
-    print("[Step 3/7] Preprocessing complete.\n")
+        run_step("create-bc-boundary", DL.create_bc_boundary)
+
+        print("[Step 3/7] Preprocessing complete.\n")
+
+    else:
+
+        print("[Step 3/7] Preprocessing SKIPPED (SKIP_PREPROCESS=True).\n")
 
     # ---------------------------------
     # STEP 4
     # ---------------------------------
 
-    print("[Step 4/7] Building vector outputs...")
+    if not SKIP_VECTOR:
 
-    LOG.info("=== Step 4/7: process-vector ===")
+        print("[Step 4/7] Building vector outputs...")
 
-    run_step("designations-overlapping", lambda: DL.create_designations_overlapping(suffix=dl_suffix))
+        LOG.info("=== Step 4/7: process-vector ===")
 
-    run_step("designations-planarized", lambda: DL.create_designations_planarized(suffix=dl_suffix))
+        run_step("designations-overlapping", lambda: DL.create_designations_overlapping(suffix=dl_suffix))
 
-    print("[Step 4/7] Vector processing complete.\n")
+        run_step("designations-planarized", lambda: DL.create_designations_planarized(suffix=dl_suffix))
+
+        print("[Step 4/7] Vector processing complete.\n")
+
+    else:
+
+        print("[Step 4/7] Vector processing SKIPPED (SKIP_VECTOR=True).\n")
 
     print("[Step 4/7] Running Critical Habitat Area intersections...")
 

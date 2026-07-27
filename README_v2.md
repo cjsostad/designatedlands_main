@@ -664,7 +664,7 @@ Non-overlapping output. Where designations overlap, the polygon is assigned to t
 | `designation` | Highest-priority designation code on 1 - 42 scale from .csv file (lowest `process_order`) |
 | `overlapping_designations` | Semicolon-delimited list of all designation codes that overlap this polygon (e.g., `vqo_retain; fsw`), sorted by priority |
 | `source_id` | Source feature ID from the winning (highest-priority) contributing designation feature |
-| `source_name` | Source feature name from the winning (highest-priority) contributing designation feature |
+| `source_name` | Source feature name from the winning (highest-priority) contributing designation feature. The specific attribute read is controlled by the `source_name_col` column in `sources_designations.csv` — it varies per source layer (e.g., `protected_lands_name` for BC Parks layers, `conservancy_area_name` for Conservancies, `site_name` for Wildlife Management Areas, `ENGLISH_NAME` for National Parks). The wide variety of values across rows reflects the diversity of naming fields in the underlying BCGW source data. |
 | `forest_restriction_max` | Maximum forest restriction across overlapping designations |
 | `mine_restriction_max` | Maximum mine restriction |
 | `og_restriction_max` | Maximum oil & gas restriction |
