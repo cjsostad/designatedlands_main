@@ -100,13 +100,13 @@ def main():
     #             "YYYY-MM-DD"      = filter active; only features
     #                                 added/modified in the window are kept.
     # END_DATE:   "" with a populated START_DATE defaults to today.
-    START_DATE     = ""   # Start of date window (YYYY-MM-DD) or "" for no filter
-    END_DATE       = ""   # End of date window (YYYY-MM-DD) or "" for today
+    START_DATE     = "2026-04-01"   # Start of date window (YYYY-MM-DD) or "" for no filter
+    END_DATE       = "2026-09-30"   # End of date window (YYYY-MM-DD) or "" for today
     EXCLUDE_FEDERAL = True          # Exclude National Parks, NWAs, Migratory Bird Sanctuaries
-    SKIP_DOWNLOAD  = True          # True = skip WFS download (use existing data in GDB)
-    SKIP_PREPROCESS = True         # True = skip preprocess + BC boundary (use existing pp layers)
-    SKIP_VECTOR    = True          # True = skip vector build (designations_overlapping/planarized already in GDB)
-    SKIP_CLEANUP   = True           # True = keep intermediate feature classes
+    SKIP_DOWNLOAD  = False          # True = skip WFS download (use existing data in GDB)
+    SKIP_PREPROCESS = False         # True = skip preprocess + BC boundary (use existing pp layers)
+    SKIP_VECTOR    = False          # True = skip vector build (designations_overlapping/planarized already in GDB)
+    SKIP_CLEANUP   = False           # True = keep intermediate feature classes
     RASTER         = False          # True = create raster outputs (requires Spatial Analyst)
     CHA_FILTER_OUT_WRS = False      # True = full CHA filter (FINAL + BC + exclude species)
                                     # False = minimal CHA filter (FINAL + BC only)
