@@ -108,3 +108,49 @@ def ensure_file_gdb(path: str, recreate_invalid: bool = False, logger: logging.L
     if logger:
         logger.info("Created output File Geodatabase: %s", path)
     return path
+
+
+def write_run_manifest(output_gdb: str, manifest: dict, logger: logging.Logger = None) -> None:
+    """Create/overwrite a single-row 'run_manifest' table in output_gdb."""
+    text_fields = [
+        "run_timestamp", "date_filter", "start_date", "end_date",
+        "exclude_federal", "skip_download", "skip_cleanup", "raster",
+        "cha_filter_out_wrs", "output_gdb", "log_file",
+    ]
+    long_fields = [
+        "cha_report_row_limit", "planarized_count", "overlapping_count",
+        "planarized_cha_count", "overlapping_cha_count",
+    ]
+
+    def _coerce_text(value):
+        if isinstance(value, bool):
+            return "Yes" if value else "No"
+        if value is None:
+            return ""
+        return str(value)
+
+    try:
+        table_path = os.path.join(output_gdb, "run_manifest")
+        if arcpy.Exists(table_path):
+            arcpy.management.Delete(table_path)
+
+        arcpy.management.CreateTable(output_gdb, "run_manifest")
+
+        for fname in text_fields:
+            arcpy.management.AddField(table_path, fname, "TEXT", field_length=255)
+        for fname in long_fields:
+            arcpy.management.AddField(table_path, fname, "LONG")
+
+        field_order = text_fields + long_fields
+        row = tuple(
+            _coerce_text(manifest.get(f)) if f in text_fields else manifest.get(f)
+            for f in field_order
+        )
+        with arcpy.da.InsertCursor(table_path, field_order) as cursor:
+            cursor.insertRow(row)
+
+        if logger:
+            logger.info("Wrote run_manifest table to %s", output_gdb)
+    except Exception as manifest_err:
+        if logger:
+            logger.warning("Could not write run_manifest table: %s", manifest_err)

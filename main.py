@@ -60,7 +60,7 @@ from designatedlands import DesignatedLands, log_arcpy_messages, set_log_level
 from create_cha import prepare_cha   # <-- import CHA script (retry + fallback, no AOI)
 from intersect_area_calc import run_cha_intersection
 from date_filter import run_report
-from gdb_utils import ensure_file_gdb
+from gdb_utils import ensure_file_gdb, write_run_manifest
 
 
 # Max rows written to each CHA result sheet in the xlsx report.
@@ -90,6 +90,9 @@ def main():
 
     parser = build_parser()
     args = parser.parse_args()
+
+    # Single run timestamp for the whole run (drives the output GDB name).
+    run_started = datetime.datetime.now()
 
     # =================================================================
     # PIPELINE OPTIONS  —  Edit these directly, then hit Run in VS Code
@@ -320,8 +323,11 @@ def main():
     planarized_fc = os.path.join(DL.gdb, f"designations_planarized{dl_suffix}")
     overlapping_fc = os.path.join(DL.gdb, f"designations_overlapping{dl_suffix}")
 
-    # Final output gdb
-    output_gdb = os.path.join(script_dir, "outputs", "designatedlands_output.gdb")
+    # Final output gdb (timestamped per run)
+    output_gdb = os.path.join(
+        script_dir, "outputs",
+        f"designatedlands_output_{run_started:%Y%m%d_%H%M%S}.gdb"
+    )
     ensure_file_gdb(output_gdb, recreate_invalid=True, logger=LOG)
 
     # Date-stamped output names
@@ -445,9 +451,43 @@ def main():
 
     LOG.info("=== Step 6/7: dump ===")
 
-    run_step("dump", lambda: DL.dump(suffix=dl_suffix))
+    run_step("dump", lambda: DL.dump(suffix=dl_suffix, output_gdb=output_gdb))
 
     print("[Step 6/7] Export complete.\n")
+
+    # ---------------------------------
+    # Run manifest (self-documenting output GDB)
+    # ---------------------------------
+    planarized_src = os.path.join(DL.gdb, f"designations_planarized{dl_suffix}")
+    overlapping_src = os.path.join(DL.gdb, f"designations_overlapping{dl_suffix}")
+    planarized_count = (
+        int(arcpy.management.GetCount(planarized_src)[0])
+        if arcpy.Exists(planarized_src) else None
+    )
+    overlapping_count = (
+        int(arcpy.management.GetCount(overlapping_src)[0])
+        if arcpy.Exists(overlapping_src) else None
+    )
+
+    manifest = {
+        "run_timestamp": run_started.isoformat(timespec="seconds"),
+        "date_filter": "On" if date_filter_active else "Off",
+        "start_date": START_DATE,
+        "end_date": END_DATE,
+        "exclude_federal": EXCLUDE_FEDERAL,
+        "skip_download": SKIP_DOWNLOAD,
+        "skip_cleanup": SKIP_CLEANUP,
+        "raster": RASTER,
+        "cha_filter_out_wrs": CHA_FILTER_OUT_WRS,
+        "cha_report_row_limit": CHA_REPORT_ROW_LIMIT,
+        "planarized_count": planarized_count,
+        "overlapping_count": overlapping_count,
+        "planarized_cha_count": cha_result.get("planarized_total_rows"),
+        "overlapping_cha_count": cha_result.get("overlapping_total_rows"),
+        "output_gdb": output_gdb,
+        "log_file": log_path,
+    }
+    write_run_manifest(output_gdb, manifest, logger=LOG)
 
     # ---------------------------------
     # STEP 7
