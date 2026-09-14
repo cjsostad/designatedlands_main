@@ -4,17 +4,18 @@ pipeline_reset.py — Pre-run GDB cleanup utility
 PURPOSE
 -------
 Use this script before running main.py when you want to change the date
-filter settings (e.g. switching from RECENT_ONLY=True to RECENT_ONLY=False,
-or changing START_DATE/END_DATE). It deletes all stale designation feature
-classes from the working GDB so that the next pipeline run downloads
-fresh data matching your new settings.
+filter settings (i.e. turning the date filter on/off, or changing
+START_DATE / END_DATE). It deletes all stale designation feature classes
+from the working GDB so that the next pipeline run downloads fresh data
+matching your new settings.
 
 WHY THIS IS NECESSARY
 ---------------------
-When RECENT_ONLY=False, the pipeline passes overwrite=False to the download
-step. This means any feature class already in the GDB is silently skipped —
-even if it was downloaded during a previous date-filtered run. Running this
-script clears those stale layers, guaranteeing the next run fetches clean data.
+When the date filter is off (START_DATE is an empty string), the pipeline
+passes overwrite=False to the download step. Any feature class already in
+the GDB is silently reused — even if it was left over from an earlier
+date-filtered run. Running this script clears those stale layers,
+guaranteeing the next run fetches clean data.
 
 WHAT GETS DELETED
 -----------------
@@ -36,10 +37,12 @@ so they are kept intact:
 
 HOW TO USE
 ----------
-1. Run this script (click the Run button in VS Code).
-2. Confirm the deletion when prompted.
-3. Edit your PIPELINE OPTIONS in main.py (e.g. set RECENT_ONLY=False).
-4. Run main.py as normal.
+1. Run this script (click the Run button in VS Code, or
+   `python pipeline_reset.py` from the project root).
+2. Review the list of feature classes to be deleted.
+3. Type YES at the prompt to confirm (anything else cancels).
+4. Edit your PIPELINE OPTIONS in main.py (e.g. set or clear START_DATE).
+5. Run main.py as normal.
 """
 
 import os
