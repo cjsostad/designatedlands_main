@@ -1762,19 +1762,28 @@ class DesignatedLands:
     # Dump outputs
     # ------------------------------------------------------------------
 
-    def dump(self, suffix=""):
+    def dump(self, suffix="", output_gdb=None):
         """Export output feature classes to a File Geodatabase.
 
         Parameters
         ----------
         suffix : str
             Optional suffix appended to FC names (e.g. "_date_filter").
+        output_gdb : str, optional
+            Existing output GDB to use. When supplied, it is preserved so
+            feature classes written by earlier pipeline steps remain intact.
         """
-        out_dir = Path(self.config["out_path"]).resolve()
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_gdb_name = "designatedlands_output.gdb"
-        out_gdb = str(out_dir / out_gdb_name)
-        ensure_file_gdb(out_gdb, recreate_invalid=True, logger=LOG)
+        if output_gdb is None:
+            out_dir = Path(self.config["out_path"])
+            if not out_dir.is_absolute():
+                out_dir = Path(self.gdb).parent / out_dir
+            out_dir = out_dir.resolve()
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_gdb = str(out_dir / "designatedlands_output.gdb")
+            ensure_file_gdb(out_gdb, recreate_invalid=True, logger=LOG)
+        else:
+            out_gdb = os.path.abspath(str(output_gdb))
+            ensure_file_gdb(out_gdb, recreate_invalid=False, logger=LOG)
 
         for fc_name in (f"designations_planarized{suffix}", f"designations_overlapping{suffix}"):
             fc_path = os.path.join(self.gdb, fc_name)

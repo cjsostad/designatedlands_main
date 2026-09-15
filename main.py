@@ -445,7 +445,7 @@ def main():
 
     LOG.info("=== Step 6/7: dump ===")
 
-    run_step("dump", lambda: DL.dump(suffix=dl_suffix))
+    run_step("dump", lambda: DL.dump(suffix=dl_suffix, output_gdb=output_gdb))
 
     print("[Step 6/7] Export complete.\n")
 
