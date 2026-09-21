@@ -406,6 +406,21 @@ CHA_FILTER_OUT_WRS = False          # True = full CHA filter (FINAL + BC + exclu
 | `RASTER` | bool | `False` | When `True`, runs the optional raster processing step (Step 5) after the vector outputs are complete. This converts designation polygons to four GeoTIFFs: `designatedlands.tif`, `forest_restriction.tif`, `og_restriction.tif`, and `mine_restriction.tif`. **Requires the ArcGIS Spatial Analyst extension** — the pipeline will fail at this step without it. Leave `False` if you only need vector outputs or do not have Spatial Analyst licensed. |
 | `CHA_FILTER_OUT_WRS` | bool | `False` | Controls how broadly the Critical Habitat Area (CHA) dataset is filtered when downloaded from ECCC. When `True`, applies the full filter: FINAL status + British Columbia + excludes a defined list of wide-ranging species (e.g., Woodland Caribou, Grizzly Bear) whose critical habitat extends well beyond BC or overlaps complex jurisdictional boundaries. When `False`, applies only the FINAL status and BC filters — all species are included. Use `False` for standard SARA reporting runs; use `True` only when the wide-ranging species exclusions are appropriate for your analytical scope. |
 
+### Re-running the pipeline with different settings
+
+> ⚠️ **The pipeline does not detect when a toggle changed between runs.** Intermediate `src_*` and `*_pp` feature classes in `designatedlands.gdb` are silently reused if they already exist, regardless of the settings that produced them. Run [`pipeline_reset.py`](pipeline_reset.py) before your next `main.py` run whenever any of the following change:
+
+| Toggle changed | Why a reset is needed |
+|---|---|
+| `START_DATE` / `END_DATE` set, cleared, or window shifted | `src_*` layers were downloaded with (or without) a date filter; re-running will reuse them instead of fetching the corrected set. |
+| `EXCLUDE_FEDERAL` flipped `True` → `False` | Federal `src_*` layers are missing from the GDB and will stay missing unless a fresh download is forced. |
+| `CHA_FILTER_OUT_WRS` flipped, while `SKIP_DOWNLOAD = True` | `create_cha.py` runs inside the download step; skipping the download means the CHA feature class keeps its previous WRS filter state. Either run the reset, or set `SKIP_DOWNLOAD = False` for that run so CHA is re-prepared. |
+| Any edit to `sources_designations.csv` (query, preprocess op, priority) | The affected `src_*` and `*_pp` layers no longer match the CSV logic. |
+
+**Safe re-runs (no reset needed):** rerunning with the same settings; toggling `SKIP_CLEANUP`, `RASTER`, `SKIP_VECTOR`, or the verbosity flags; re-running after `pipeline_reset.py` has just been run.
+
+**Quick rule of thumb:** if you changed *what data goes in*, reset. If you only changed *what steps run* or *how outputs are named*, don't bother.
+
 ### Subcommand interface (Untested)
 
 `designatedlands.py` also exposes individual pipeline steps as subcommands for advanced use:
