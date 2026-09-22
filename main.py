@@ -86,6 +86,49 @@ def build_parser():
     return parser
 
 
+def inject_meteor_lake_wma(DL):
+    # One-off: date-filtered runs drop WMA (no date field); re-inject the
+    # pre-staged Meteor Lake WMA so it appears in the overlapping/planarized outputs.
+    designation = "wildlife_management_area"
+    if any(s.get("designation") == designation for s in DL.sources):
+        LOG.info("[INJECT] WMA source already present — skipping Meteor Lake injection")
+        print("[INJECT] WMA source already present — skipping Meteor Lake injection")
+        return
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    src_fc = os.path.join(
+        script_dir, "source_data", "meteorlake_wma.gdb", "meteorlake_wma"
+    )
+    if not arcpy.Exists(src_fc):
+        raise FileNotFoundError(
+            f"Meteor Lake WMA feature class not found: {src_fc}"
+        )
+
+    target_name = "src_08_wildlife_management_area"
+    target_fc = os.path.join(DL.gdb, target_name)
+
+    # Explicit Delete + CopyFeatures — FGDBs on UNC paths ignore overwriteOutput.
+    if arcpy.Exists(target_fc):
+        arcpy.management.Delete(target_fc)
+    arcpy.management.CopyFeatures(src_fc, target_fc)
+
+    DL.sources.append({
+        "process_order": "08",
+        "designation": designation,
+        "name": "Wildlife Management Areas (Meteor Lake injection)",
+        "src": target_name,
+        "preprc": target_name + "_pp",
+        "source_id_col": "",
+        "source_name_col": "",
+        "forest_restriction": 3,
+        "og_restriction": 1,
+        "mine_restriction": 1,
+    })
+
+    LOG.info("[INJECT] Meteor Lake WMA added to sources as %s", target_name)
+    print(f"[INJECT] Meteor Lake WMA added to sources as {target_name}")
+
+
 def main():
 
     parser = build_parser()
@@ -265,6 +308,13 @@ def main():
               f"(no features in date window).\n")
     else:
         print(f"[Pre-check] All {n_present} sources present.\n")
+
+    # One-off Meteor Lake WMA injection for date-filtered runs.
+    if date_filter_active:
+        print("[INJECT] Adding Meteor Lake WMA to date-filtered sources...")
+        LOG.info("=== Inject Meteor Lake WMA ===")
+        run_step("inject-meteor-lake-wma", lambda: inject_meteor_lake_wma(DL))
+        print("[INJECT] Meteor Lake WMA injection complete.\n")
 
     # ---------------------------------
     # STEP 3
