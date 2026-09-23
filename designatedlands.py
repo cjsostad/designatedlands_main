@@ -34,6 +34,7 @@ import stat
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.request
 import zipfile
 from functools import wraps
@@ -121,6 +122,13 @@ BC_BOUNDS = {
 
 # BCGW WFS base URL (public, no auth required)
 BCGW_WFS_URL = "https://openmaps.gov.bc.ca/geo/pub/wfs"
+
+# DataBC GeoServer truncates any single GetFeature response at this many features
+# without signalling an error. Anything above this must be paged.
+WFS_SERVER_MAX = 10000
+# Page size used for the paged download path. Kept well below WFS_SERVER_MAX so
+# a single-page truncation cannot silently occur.
+WFS_PAGE_SIZE = 5000
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +530,68 @@ def resolve_catalogue_to_wfs_layer(slug: str) -> str:
     )
 
 
+def _drop_z(coords):
+    """Recursively strip the third (Z) ordinate from a GeoJSON coordinate array."""
+    if not coords:
+        return coords
+    if isinstance(coords[0], (int, float)):
+        return coords[:2]
+    return [_drop_z(c) for c in coords]
+
+
+def _strip_z_and_bbox(feature):
+    """Remove bbox metadata and Z ordinates from a single GeoJSON feature in place.
+
+    JSONToFeatures can still infer 3D geometry from bbox arrays even after
+    coordinates are flattened, so both must be removed.
+    """
+    feature.pop("bbox", None)
+    geom = feature.get("geometry")
+    if geom:
+        geom.pop("bbox", None)
+        if "coordinates" in geom:
+            geom["coordinates"] = _drop_z(geom["coordinates"])
+
+
+def _wfs_request(params, layer_name):
+    """Issue a single WFS GetFeature request with up to 3 retries.
+
+    Retries connection errors, timeouts, and 5xx responses with a short backoff.
+    Non-retryable HTTP errors and the final retry exhaustion are raised.
+    """
+    last_exc = None
+    for attempt in range(1, 4):
+        try:
+            resp = requests.get(
+                BCGW_WFS_URL, params=params, verify=False, timeout=300
+            )
+            if 500 <= resp.status_code < 600:
+                raise requests.HTTPError(
+                    f"{resp.status_code} server error", response=resp
+                )
+            resp.raise_for_status()
+            return resp.json()
+        except (requests.ConnectionError, requests.Timeout, requests.HTTPError) as exc:
+            # Only retry HTTPError if it's a 5xx (the branch above); other
+            # HTTPErrors from raise_for_status (4xx) fall through to re-raise.
+            if isinstance(exc, requests.HTTPError):
+                status = getattr(exc.response, "status_code", None)
+                if status is None or not (500 <= status < 600):
+                    raise
+            last_exc = exc
+            if attempt == 3:
+                break
+            backoff = 2 * attempt
+            LOG.warning(
+                "  WFS request for %s failed (attempt %d/3): %s. Retrying in %ds.",
+                layer_name, attempt, exc, backoff,
+            )
+            time.sleep(backoff)
+    raise RuntimeError(
+        f"WFS request for {layer_name} failed after 3 attempts: {last_exc}"
+    ) from last_exc
+
+
 def download_bcgw_wfs(
     package: str,
     out_fc: str,
@@ -531,6 +601,11 @@ def download_bcgw_wfs(
     """
     Download a BCGW layer via its public WFS endpoint and load it into
     an ArcGIS File Geodatabase feature class.
+
+    The DataBC GeoServer silently caps any single GetFeature response at
+    WFS_SERVER_MAX features. This function first probes numberMatched and
+    switches to a paged download (sorted by OBJECTID) whenever the true count
+    exceeds that cap, so no layer is truncated.
 
     Parameters
     ----------
@@ -545,8 +620,7 @@ def download_bcgw_wfs(
     """
     LOG.info("Downloading BCGW layer: %s", package)
 
-    # Build WFS request — use GeoJSON output for easy loading
-    params = {
+    base_params = {
         "SERVICE": "WFS",
         "VERSION": "2.0.0",
         "REQUEST": "GetFeature",
@@ -555,50 +629,191 @@ def download_bcgw_wfs(
         "SRSNAME": "EPSG:3005",
     }
     if query:
-        params["CQL_FILTER"] = query
+        base_params["CQL_FILTER"] = query
 
-    resp = requests.get(BCGW_WFS_URL, params=params, verify=False, timeout=300)
-    resp.raise_for_status()
+    # --- Probe: numberMatched via count=1 ------------------------------------
+    probe = _wfs_request({**base_params, "count": 1}, package)
+    if "numberMatched" not in probe:
+        raise RuntimeError(
+            f"WFS probe response for {package} did not include numberMatched; "
+            f"cannot verify completeness."
+        )
+    # numberMatched is returned as a string by GeoServer.
+    try:
+        number_matched = int(probe["numberMatched"])
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"WFS probe for {package} returned non-integer numberMatched="
+            f"{probe.get('numberMatched')!r}"
+        ) from exc
+    LOG.info("  numberMatched (probe): %d", number_matched)
 
-    geojson_data = resp.json()
-    feature_count = len(geojson_data.get("features", []))
-    LOG.info("  Retrieved %d features", feature_count)
-
-    if feature_count == 0:
+    if number_matched == 0:
         LOG.warning("  No features returned for %s", package)
         return
 
-    # Strip Z/M coordinates and bbox metadata — JSONToFeatures can still infer
-    # 3D geometry from bbox arrays even after coordinates are flattened.
-    def _drop_z(coords):
-        if not coords:
-            return coords
-        if isinstance(coords[0], (int, float)):
-            return coords[:2]
-        return [_drop_z(c) for c in coords]
+    # --- Single-request path -------------------------------------------------
+    if number_matched <= WFS_SERVER_MAX:
+        LOG.info("  Using single-request path (<= %d features)", WFS_SERVER_MAX)
+        data = _wfs_request(base_params, package)
+        features = data.get("features", [])
+        if len(features) != number_matched:
+            raise RuntimeError(
+                f"Single-request download of {package} returned {len(features)} "
+                f"features but numberMatched={number_matched}."
+            )
 
-    geojson_data.pop("bbox", None)
-    for feature in geojson_data.get("features", []):
-        feature.pop("bbox", None)
-        geom = feature.get("geometry")
-        if geom:
-            geom.pop("bbox", None)
-            if "coordinates" in geom:
-                geom["coordinates"] = _drop_z(geom["coordinates"])
+        data.pop("bbox", None)
+        for feat in features:
+            _strip_z_and_bbox(feat)
 
-    # Write GeoJSON to a temp file and load with arcpy
-    with tempfile.NamedTemporaryFile(
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".geojson", delete=False, encoding="utf-8"
+        ) as tf:
+            json.dump(data, tf)
+            tf_path = tf.name
+        try:
+            with arcpy.EnvManager(outputZFlag="Disabled", outputMFlag="Disabled"):
+                arcpy.conversion.JSONToFeatures(tf_path, out_fc)
+            LOG.info("  Loaded %s into %s", package, out_fc)
+        finally:
+            os.unlink(tf_path)
+        return
+
+    # --- Paged path ----------------------------------------------------------
+    LOG.info(
+        "  Using paged path (%d features > %d cap; page size %d)",
+        number_matched, WFS_SERVER_MAX, WFS_PAGE_SIZE,
+    )
+
+    probe_feats = probe.get("features") or []
+    if not probe_feats:
+        raise RuntimeError(
+            f"WFS probe for {package} returned no sample feature; cannot verify OBJECTID."
+        )
+    probe_props = probe_feats[0].get("properties") or {}
+    if "OBJECTID" not in probe_props:
+        raise RuntimeError(
+            f"WFS layer {package} has no OBJECTID property; refusing to page "
+            f"without a stable sort key."
+        )
+
+    # CRS: must be carried through so JSONToFeatures does not default to WGS84.
+    # It is read from the first data page (startIndex=0), per spec.
+
+    # Stream one FeatureCollection to a temp file, one page at a time.
+    tf = tempfile.NamedTemporaryFile(
         "w", suffix=".geojson", delete=False, encoding="utf-8"
-    ) as tf:
-        json.dump(geojson_data, tf)
-        tf_path = tf.name
-
+    )
+    tf_path = tf.name
+    written = 0
+    seen_oids = set()
     try:
-        with arcpy.EnvManager(outputZFlag="Disabled", outputMFlag="Disabled"):
-            arcpy.conversion.JSONToFeatures(tf_path, out_fc)
-        LOG.info("  Loaded %s into %s", package, out_fc)
+        try:
+            start_index = 0
+            first_written = True
+            header_written = False
+            while True:
+                page_params = {
+                    **base_params,
+                    "sortBy": "OBJECTID",
+                    "count": WFS_PAGE_SIZE,
+                    "startIndex": start_index,
+                }
+                page = _wfs_request(page_params, package)
+                page_feats = page.get("features") or []
+
+                # Write the FeatureCollection header lazily, using crs from the
+                # first data page so the output carries the correct SRS.
+                if not header_written:
+                    crs_member = page.get("crs")
+                    if crs_member is None:
+                        raise RuntimeError(
+                            f"WFS first page for {package} has no top-level "
+                            f"'crs' member; cannot preserve spatial reference."
+                        )
+                    tf.write('{"type":"FeatureCollection","crs":')
+                    json.dump(crs_member, tf)
+                    tf.write(',"features":[')
+                    header_written = True
+
+                if not page_feats:
+                    LOG.info(
+                        "  Page startIndex=%d returned 0 features; stopping.",
+                        start_index,
+                    )
+                    break
+
+                for feat in page_feats:
+                    props = feat.get("properties") or {}
+                    oid = props.get("OBJECTID")
+                    if oid is None:
+                        raise RuntimeError(
+                            f"WFS page for {package} at startIndex={start_index} "
+                            f"contained a feature with no OBJECTID."
+                        )
+                    if oid in seen_oids:
+                        raise RuntimeError(
+                            f"WFS paged download of {package} produced duplicate "
+                            f"OBJECTID={oid}; pages overlapped."
+                        )
+                    seen_oids.add(oid)
+                    _strip_z_and_bbox(feat)
+                    if not first_written:
+                        tf.write(",")
+                    json.dump(feat, tf)
+                    first_written = False
+                    written += 1
+
+                LOG.info(
+                    "  Page startIndex=%d received=%d running_total=%d/%d",
+                    start_index, len(page_feats), written, number_matched,
+                )
+
+                if written >= number_matched:
+                    break
+                start_index += WFS_PAGE_SIZE
+
+            tf.write("]}")
+            tf.close()
+
+            if written != number_matched:
+                raise RuntimeError(
+                    f"Paged download of {package} wrote {written} features but "
+                    f"numberMatched={number_matched}."
+                )
+
+            with arcpy.EnvManager(outputZFlag="Disabled", outputMFlag="Disabled"):
+                arcpy.conversion.JSONToFeatures(tf_path, out_fc)
+
+            fc_count = int(arcpy.management.GetCount(out_fc)[0])
+            if fc_count != number_matched:
+                raise RuntimeError(
+                    f"Paged download of {package} loaded {fc_count} features "
+                    f"but numberMatched={number_matched}."
+                )
+            LOG.info(
+                "  Loaded %s into %s (%d features)", package, out_fc, fc_count
+            )
+        except Exception:
+            # Never leave a partial FC on disk — download() would then skip it
+            # as "already loaded" on the next run.
+            try:
+                if arcpy.Exists(out_fc):
+                    arcpy.management.Delete(out_fc)
+            except Exception:
+                LOG.exception("  Failed to delete partial output %s", out_fc)
+            raise
     finally:
-        os.unlink(tf_path)
+        try:
+            if not tf.closed:
+                tf.close()
+        except Exception:
+            pass
+        try:
+            os.unlink(tf_path)
+        except OSError:
+            pass
 
 
 def load_file_to_gdb(
