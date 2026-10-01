@@ -100,10 +100,10 @@ def main():
     #             "YYYY-MM-DD"      = filter active; only features
     #                                 added/modified in the window are kept.
     # END_DATE:   "" with a populated START_DATE defaults to today.
-    START_DATE     = "2026-04-01"   # Start of date window (YYYY-MM-DD) or "" for no filter
+    START_DATE     = ""   # Start of date window (YYYY-MM-DD) or "" for no filter
     END_DATE       = ""   # End of date window (YYYY-MM-DD) or "" for today
     EXCLUDE_FEDERAL = True          # Exclude National Parks, NWAs, Migratory Bird Sanctuaries
-    SKIP_DOWNLOAD  = False          # True = skip WFS download (use existing data in GDB)
+    SKIP_DOWNLOAD  = False            # True = skip WFS download (use existing data in GDB)
     SKIP_PREPROCESS = False         # True = skip preprocess + BC boundary (use existing pp layers)
     SKIP_VECTOR    = False          # True = skip vector build (designations_overlapping/planarized already in GDB)
     SKIP_CLEANUP   = True           # True = keep intermediate feature classes
