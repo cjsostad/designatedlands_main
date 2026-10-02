@@ -825,10 +825,10 @@ flowchart TD
     B2 --> C
     B3 --> C
     B4 --> C
-    C --> D[federal_exclusion_sources<br/>overlapping, Fed_Source preserved]
+    C --> D[Creates Feature layer federal_exclusion_sources<br/>These are overlapping polygons, with the Fed_Source a preserved]
     D --> E[RepairGeometry]
     E --> F[PairwiseDissolve<br/>dissolve_field=None<br/>multi_part=SINGLE_PART]
-    F --> G[federal_exclusion_mask<br/>single-part, no attrs]
+    F --> G[Creates feature layer federal_exclusion_mask<br/>single-part geom, no attributes]
     H[critical_habitat_area_pre_fed_erase] --> I[PairwiseErase]
     G --> I
     I --> J[critical_habitat_area_post_fed_erase]
