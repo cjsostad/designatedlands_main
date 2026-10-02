@@ -102,10 +102,13 @@ def main():
     # END_DATE:   "" with a populated START_DATE defaults to today.
     START_DATE     = ""   # Start of date window (YYYY-MM-DD) or "" for no filter
     END_DATE       = ""   # End of date window (YYYY-MM-DD) or "" for today
-    EXCLUDE_FEDERAL = True          # Exclude National Parks, NWAs, Migratory Bird Sanctuaries
+    EXCLUDE_FEDERAL = True          # Drop federal designation layers (NP, NWA, MBS) from the provincial stack
+    # FEDERAL_ERASE removes federal LAND from the CHA geometry before overlap analysis.
+    # Independent of EXCLUDE_FEDERAL (that one gates designation sources; this one gates CHA geometry).
+    FEDERAL_ERASE  = True           # Erase federal land (PMBC fed, IRs, NPs, NWAs) from CHA before intersect
     SKIP_DOWNLOAD  = False            # True = skip WFS download (use existing data in GDB)
     SKIP_PREPROCESS = False         # True = skip preprocess + BC boundary (use existing pp layers)
-    SKIP_VECTOR    = False          # True = skip vector build (designations_overlapping/planarized already in GDB)
+    SKIP_VECTOR    = False          # True = skip vector build (use designations_overlapping/planarized already in GDB)
     SKIP_CLEANUP   = True           # True = keep intermediate feature classes
     RASTER         = False          # True = create raster outputs (requires Spatial Analyst)
     CHA_FILTER_OUT_WRS = False      # True = full CHA filter (FINAL + BC + exclude species)
@@ -172,6 +175,7 @@ def main():
     print("=" * 70)
     print(f"  Date filter               : {date_banner}")
     print(f"  Exclude federal layers    : {EXCLUDE_FEDERAL}")
+    print(f"  Erase federal land from CHA: {FEDERAL_ERASE}")
     print(f"  Skip download             : {SKIP_DOWNLOAD}")
     print(f"  Skip preprocess           : {SKIP_PREPROCESS}")
     print(f"  Skip vector processing    : {SKIP_VECTOR}")
@@ -238,6 +242,8 @@ def main():
         prepare_cha(
             source_data_dir=os.path.join(script_dir, "source_data"),
             query_override=cha_query_override,
+            federal_mask_gdb=DL.gdb,
+            apply_federal_erase=FEDERAL_ERASE,
         )
 
         print("[Step 2/7] CHA preparation complete.\n")
@@ -313,7 +319,7 @@ def main():
         script_dir,
         "source_data",
         "cha_exported.gdb",
-        "critical_habitat_area"
+        "critical_habitat_area_post_fed_erase"
     )
 
     # Pipeline outputs (intermediate)
@@ -386,6 +392,7 @@ def main():
         "end_date": DL.end_date,
         # Full snapshot of every PIPELINE OPTION flag from main.py
         "exclude_federal": EXCLUDE_FEDERAL,
+        "federal_erase": FEDERAL_ERASE,
         "skip_download": SKIP_DOWNLOAD,
         "skip_cleanup": SKIP_CLEANUP,
         "raster": RASTER,

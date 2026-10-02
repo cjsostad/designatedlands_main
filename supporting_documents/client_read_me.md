@@ -7,6 +7,29 @@ are internal GIS/pipeline bookkeeping.
 The workbook has **7 tabs**. The first 5 are run bookkeeping for the GIS analyst — you
 generally don't need them. The last 2 are the actual species/land-designation results.
 
+> **What changed in the October 2026 edition.** Before the pipeline measures how much
+> of each species' Critical Habitat is covered by provincial protections, it now
+> **removes federal land** (National Parks, National Wildlife Areas, Indian Reserves,
+> and any other federally-owned parcels) from the Critical Habitat polygons.
+> This matters because the federal portions of Critical Habitat are **not** B.C.'s
+> reporting responsibility under SARA s. 63 — they belong to the federal
+> government. By cutting them out first, every percentage in Tabs 6 and 7 answers
+> the right question: *of the Critical Habitat on **non-federal** land in B.C.,
+> how much is already protected by a provincial designation?* Any species whose
+> Critical Habitat sits **entirely** on federal land is flagged separately and
+> drops out of the overlap tables.
+
+> **Note — "Entirely federal" Critical Habitat.** When federal land is cut
+> out of a Critical Habitat polygon, most polygons shrink but still have
+> some non-federal portion left behind. A small number may have **nothing
+> left** — i.e. the entire polygon sat on federal land. These are set aside
+> into a separate side-table (not shown in Tabs 6 and 7) because they do
+> not contribute to B.C.'s SARA s. 63 reporting responsibility.
+>
+> If you need the list of species / polygons that landed in this category
+> for a given run, just ask the GIS analyst — the information is retained
+> alongside the main outputs and can be exported as a table.
+
 ---
 
 ## Tabs 1–5: Pipeline bookkeeping (GIS analyst — you can skip these)
@@ -51,9 +74,10 @@ ground. A single patch of land with 3 stacked designations will appear as 3 sepa
 | `SARA_Status` | Species at Risk Act listing status |
 | `SiteName_E` | Name of the critical habitat site |
 | `designation` (and `overlapping_designations` in Tab 6) | Which land designation(s) are present |
-| `Area_ha` | Total area of the critical habitat polygon (hectares) |
-| `Overlap_Area_ha` | Area of overlap between the designation and the critical habitat polygon |
-| `CHA_Protected_Pct` | Percentage of the critical habitat polygon covered by this overlap |
+| `ECCC_Cha_Area_Ha` | Original area of the Critical Habitat polygon as published by ECCC (hectares). Shown for reference only. |
+| `Cha_Area_Fed_Removed` | Area of the Critical Habitat polygon **after** federal land has been cut out (hectares). This is the "non-federal B.C." portion — the denominator used for the protection percentage. |
+| `Overlap_Area_Ha` | Area (hectares) where this provincial designation overlaps the non-federal portion of the Critical Habitat polygon. |
+| `Pct_of_Cha_Prot_by_LandDes` | Percentage of the **non-federal** Critical Habitat covered by this designation. Previously called `CHA_Protected_Pct`. |
 
 
 
@@ -67,8 +91,8 @@ ground. A single patch of land with 3 stacked designations will appear as 3 sepa
 | "What's the restriction rating for a given designation type?" | Designation Categories (5) |
 | "What's the strongest protection on a piece of land within critical habitat?" | **CHA Planarized (6)** |
 | "Which individual designations overlap a species' critical habitat?" | **CHA Overlapping (7)** |
-| "What % of a species' critical habitat is protected?" | CHA Planarized or Overlapping (6/7) — **confirm with GIS analyst before citing** |
+| "What % of a species' critical habitat is protected on non-federal land?" | CHA Planarized or Overlapping (6/7) — look at `Pct_of_Cha_Prot_by_LandDes`; **confirm with GIS analyst before citing** |
 
 ---
 
-*This client_readme describes the report structure as of the pipeline version reviewed in July 2026. Column names and tab contents may change as the pipeline is updated If something here doesn't match what you're looking at, check with the GIS analyst.*
+*This client_readme describes the report structure as of the pipeline version reviewed in October 2026 (federal-erase edition). Column names and tab contents may change as the pipeline is updated. If something here doesn't match what you're looking at, check with the GIS analyst.*

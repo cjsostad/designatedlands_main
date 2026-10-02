@@ -125,6 +125,17 @@ def run_cha_intersection(
             print(f"  [OK] {label}{count}")
             LOG.info("  [OK] %s%s", label, count)
 
+    # Point 1 (2026-10-01): the CHA denominator is now Cha_Area_Fed_Removed
+    # (geodesic hectares of the post-federal-erase polygon, written by
+    # create_cha.prepare_cha). Validate up front so SKIP_DOWNLOAD=True runs
+    # against a stale cha_exported.gdb fail fast with an actionable message.
+    cha_fields = [f.name for f in arcpy.ListFields(cha_fc)]
+    if "Cha_Area_Fed_Removed" not in cha_fields:
+        raise RuntimeError(
+            "CHA input predates the federal-erase change (e.g. SKIP_DOWNLOAD=True "
+            "reused an old cha_exported.gdb) \u2014 rerun with SKIP_DOWNLOAD=False."
+        )
+
     # --------------------------------------------------
     # 1. PAIRWISE INTERSECT
     #    Intersect each designation layer with the CHA
@@ -152,7 +163,7 @@ def run_cha_intersection(
 
     # --------------------------------------------------
     # 2. ADD AREA FIELDS
-    #    Add Overlap_Area_ha to BOTH intersect results.
+    #    Add Overlap_Area_Ha to BOTH intersect results.
     # --------------------------------------------------
     print("[Step 2/4] Adding area fields...")
 
@@ -160,11 +171,11 @@ def run_cha_intersection(
         ("overlapping intersect", overlapping_intersect),
         ("planarized intersect", planarized_intersect),
     ]:
-        if "Overlap_Area_ha" not in [f.name for f in arcpy.ListFields(fc)]:
-            arcpy.management.AddField(fc, "Overlap_Area_ha", "DOUBLE")
-            print(f"  Added Overlap_Area_ha to {label}")
+        if "Overlap_Area_Ha" not in [f.name for f in arcpy.ListFields(fc)]:
+            arcpy.management.AddField(fc, "Overlap_Area_Ha", "DOUBLE")
+            print(f"  Added Overlap_Area_Ha to {label}")
         else:
-            print(f"  Overlap_Area_ha already exists in {label}")
+            print(f"  Overlap_Area_Ha already exists in {label}")
 
     LOG.info("Area fields added")
 
@@ -177,84 +188,67 @@ def run_cha_intersection(
 
     arcpy.management.CalculateGeometryAttributes(
         overlapping_intersect,
-        [["Overlap_Area_ha", "AREA_GEODESIC"]],
+        [["Overlap_Area_Ha", "AREA_GEODESIC"]],
         area_unit="HECTARES",
     )
-    print("  Calculated Overlap_Area_ha on overlapping intersect")
+    print("  Calculated Overlap_Area_Ha on overlapping intersect")
 
     arcpy.management.CalculateGeometryAttributes(
         planarized_intersect,
-        [["Overlap_Area_ha", "AREA_GEODESIC"]],
+        [["Overlap_Area_Ha", "AREA_GEODESIC"]],
         area_unit="HECTARES",
     )
-    print("  Calculated Overlap_Area_ha on planarized intersect")
+    print("  Calculated Overlap_Area_Ha on planarized intersect")
 
     LOG.info("Geodesic area calculation complete")
 
     # --------------------------------------------------
     # 4. PER-FEATURE CHA PROTECTION PERCENTAGE
-    #    CHA_Protected_Pct = (Overlap_Area_ha / Area_ha) * 100
-    #    Shows what % of each original CHA polygon is covered
+    #    Pct_of_Cha_Prot_by_LandDes = (Overlap_Area_Ha / Cha_Area_Fed_Removed) * 100
+    #    Shows what % of each post-federal-erase CHA polygon is covered
     #    by the intersecting designation piece.
-    #    Area_ha is the original CHA polygon area carried
-    #    through from the CHA source feature class.
-    #    Wrapped in try/except so the pipeline continues
-    #    even if this calculation fails.
+    #    Cha_Area_Fed_Removed is the geodesic hectares of the CHA polygon
+    #    AFTER federal land has been erased (written by create_cha).
+    #    FID_critical_habitat_area_post_fed_erase now references post-erase OIDs;
+    #    CHA_Source_ID remains the stable lineage key back to the
+    #    original ECCC OBJECTID.
     # --------------------------------------------------
     cha_pct_ok = True
     try:
         print("[Step 4/4] Calculating per-feature CHA protection percentage...")
 
-        # Verify the Area_ha field carried through from the CHA source
+        safe_pct_codeblock = (
+            "def safe_pct(overlap, original):\n"
+            "    if original is None or original <= 0 or overlap is None:\n"
+            "        return None\n"
+            "    return min((overlap / original) * 100, 100.0)\n"
+        )
+
         for label, fc in [
             ("overlapping intersect", overlapping_intersect),
             ("planarized intersect", planarized_intersect),
         ]:
-            fc_fields = [f.name for f in arcpy.ListFields(fc)]
-            if "Area_ha" not in fc_fields:
-                msg = (
-                    f"WARNING: 'Area_ha' field not found in {label}. "
-                    "CHA protection percentage cannot be calculated. "
-                    f"Available fields: {fc_fields}"
-                )
-                print(f"  {msg}")
-                LOG.warning(msg)
-                cha_pct_ok = False
-                break
+            if "Pct_of_Cha_Prot_by_LandDes" not in [f.name for f in arcpy.ListFields(fc)]:
+                arcpy.management.AddField(fc, "Pct_of_Cha_Prot_by_LandDes", "DOUBLE")
 
-        if cha_pct_ok:
-            safe_pct_codeblock = (
-                "def safe_pct(overlap, original):\n"
-                "    if original is None or original <= 0 or overlap is None:\n"
-                "        return None\n"
-                "    return min((overlap / original) * 100, 100.0)\n"
+            arcpy.management.CalculateField(
+                fc,
+                "Pct_of_Cha_Prot_by_LandDes",
+                "safe_pct(!Overlap_Area_Ha!, !Cha_Area_Fed_Removed!)",
+                "PYTHON3",
+                safe_pct_codeblock,
             )
+            print(f"  Calculated Pct_of_Cha_Prot_by_LandDes on {label}")
 
-            for label, fc in [
-                ("overlapping intersect", overlapping_intersect),
-                ("planarized intersect", planarized_intersect),
-            ]:
-                if "CHA_Protected_Pct" not in [f.name for f in arcpy.ListFields(fc)]:
-                    arcpy.management.AddField(fc, "CHA_Protected_Pct", "DOUBLE")
-
-                arcpy.management.CalculateField(
-                    fc,
-                    "CHA_Protected_Pct",
-                    "safe_pct(!Overlap_Area_ha!, !Area_ha!)",
-                    "PYTHON3",
-                    safe_pct_codeblock,
-                )
-                print(f"  Calculated CHA_Protected_Pct on {label}")
-
-            LOG.info("Per-feature CHA_Protected_Pct calculation complete")
+        LOG.info("Per-feature Pct_of_Cha_Prot_by_LandDes calculation complete")
 
     except Exception:
         LOG.warning(
-            "CHA_Protected_Pct calculation failed - pipeline continues",
+            "Pct_of_Cha_Prot_by_LandDes calculation failed - pipeline continues",
             exc_info=True,
         )
         print(
-            "  WARNING: CHA_Protected_Pct calculation failed. "
+            "  WARNING: Pct_of_Cha_Prot_by_LandDes calculation failed. "
             "See log for details. Pipeline continues."
         )
         cha_pct_ok = False
@@ -268,9 +262,9 @@ def run_cha_intersection(
     print(f"  Planarized intersect      : {planarized_intersect}")
     print(f"  Overlapping intersect     : {overlapping_intersect}")
     if cha_pct_ok:
-        print("  Per-feature CHA_Protected_Pct : calculated")
+        print("  Per-feature Pct_of_Cha_Prot_by_LandDes : calculated")
     else:
-        print("  Per-feature CHA_Protected_Pct : SKIPPED (see warnings above)")
+        print("  Per-feature Pct_of_Cha_Prot_by_LandDes : SKIPPED (see warnings above)")
     print("=" * 60)
 
     LOG.info("CHA intersection complete - results in %s", output_gdb)
@@ -330,7 +324,7 @@ if __name__ == "__main__":
     run_cha_intersection(
         cha_fc=os.path.join(
             script_dir, "source_data",
-            "cha_exported.gdb", "critical_habitat_area"
+            "cha_exported.gdb", "critical_habitat_area_post_fed_erase"
         ),
         planarized_fc=os.path.join(gdb, "designations_planarized"),
         overlapping_fc=os.path.join(gdb, "designations_overlapping"),

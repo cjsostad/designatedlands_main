@@ -99,9 +99,17 @@ The method is:
 
 The planarized output is non-overlapping — every point within a designated area is attributed to exactly one designation, making it suitable for area-based reporting, cartographic display, and industry-sector restriction mapping.
 
-### Federal Exclusion
+### Federal Exclusion and Federal Erase
 
-Three of the 42 designation layers originate from **federal** jurisdiction (National Parks, National Wildlife Areas, Migratory Bird Sanctuaries). Because this analysis focuses on **provincially-managed** lands and the federal sources are drawn from a separate data repository with different update cycles, these layers are excluded by default. The `jurisdiction` column in the source CSV identifies federal sources, and the `EXCLUDE_FEDERAL` pipeline option in `main.py` controls their inclusion at runtime. Excluding federal sources does not affect the process_order numbering of remaining layers — the original ordinal values are preserved to maintain consistency across runs.
+The pipeline distinguishes two separate federal-land operations, each controlled by its own flag in `main.py`.
+
+**1. `EXCLUDE_FEDERAL` — drops federal *designation layers* from the overlap/planarized outputs.**
+Three of the 42 designation layers originate from federal jurisdiction (National Parks, National Wildlife Areas, Migratory Bird Sanctuaries). When `EXCLUDE_FEDERAL = True` (default) these layers are skipped entirely so the overlapping and planarized outputs reflect only provincial designations. The `jurisdiction` column in `sources_designations.csv` identifies the federal rows. `process_order` numbering is preserved regardless of the flag.
+
+**2. `FEDERAL_ERASE` — removes federal *land* from the Critical Habitat polygons before the CHA × designation intersection.**
+Under SARA s. 63, B.C. reports on the protection of Critical Habitat on **non-federal** land only. When `FEDERAL_ERASE = True` (default), `create_cha.py` builds a federal exclusion mask from four BCGW/ECCC sources (listed in `sources_supporting.csv` as `fed_mask_pmbc_federal`, `fed_mask_indian_reserves`, `fed_mask_national_parks`, `fed_mask_nwa`), merges and dissolves them to a single multipart polygon (`federal_exclusion_mask`), and uses `arcpy.analysis.PairwiseErase` to subtract that mask from the CHA. The raw CHA export is preserved as `critical_habitat_area_pre_fed_erase`; the erased copy becomes the authoritative `critical_habitat_area_post_fed_erase`. Any CHA polygon that is **entirely** on federal land is written to a separate `cha_fully_federal` feature class for audit and dropped from the overlap step.
+
+The two flags are independent. `EXCLUDE_FEDERAL` affects what gets stacked into `designations_overlapping`; `FEDERAL_ERASE` affects the CHA denominator used by `intersect_area_calc.py`.
 
 ### Date-Based Change Detection
 
@@ -158,7 +166,7 @@ Remove Wide Ranging Species — a defined list of wide-ranging species is exclud
 The species exclusion list is controlled by the CHA_FILTER_OUT_WRS flag in main.py. When set to True, the full filter above is applied. When set to False, only the FINAL status and BC filters are applied and all species are included — useful for testing or when a full species coverage run is required.
 
 **Output**
-Before export, the pipeline stamps the original ECCC `OBJECTID` of each feature into a new attribute field called `CHA_Source_ID`. The filtered features are then exported to a new local feature class at `source_data/cha_exported.gdb/critical_habitat_area` using FeatureClassToFeatureClass. Although ArcGIS reassigns OBJECTIDs sequentially during export, `CHA_Source_ID` survives as a regular field and flows through all subsequent intersection outputs. `CHA_Source_ID` can be joined directly to `OBJECTID` in the raw ECCC `CriticalHabitat.gdb` in `source_data/` to trace any output row back to the source national polygon.
+Before export, the pipeline stamps the original ECCC `OBJECTID` of each feature into a new attribute field called `CHA_Source_ID`. The filtered features are then exported to a new local feature class at `source_data/cha_exported.gdb/critical_habitat_area_pre_fed_erase` using FeatureClassToFeatureClass. The federal-erase step (see Appendix A) then produces `critical_habitat_area_post_fed_erase` as the authoritative CHA used downstream. Although ArcGIS reassigns OBJECTIDs sequentially during export, `CHA_Source_ID` survives as a regular field and flows through all subsequent intersection outputs. `CHA_Source_ID` can be joined directly to `OBJECTID` in the raw ECCC `CriticalHabitat.gdb` in `source_data/` to trace any output row back to the source national polygon.
 
 ### Federal exclusion
 
@@ -388,6 +396,7 @@ needed.
 START_DATE         = "2025-04-01"   # Start of date window (YYYY-MM-DD) or "" for no filter
 END_DATE           = "2026-04-01"   # End of date window (YYYY-MM-DD) or "" for today
 EXCLUDE_FEDERAL    = True           # Exclude National Parks, NWAs, Migratory Bird Sanctuaries
+FEDERAL_ERASE      = True           # Erase federal land from CHA before overlap analysis
 SKIP_DOWNLOAD      = False          # True = skip WFS download (use existing data in GDB)
 SKIP_CLEANUP       = False          # True = keep intermediate feature classes
 RASTER             = False          # True = create raster outputs (requires Spatial Analyst)
@@ -401,6 +410,7 @@ CHA_FILTER_OUT_WRS = False          # True = full CHA filter (FINAL + BC + exclu
 | `START_DATE` | str | `""` | The start of the date filter window, in `YYYY-MM-DD` format. **This is the single switch that turns the date filter on or off.** Leave as `""` (empty string) to process the full dataset with no date restriction. Set to a valid ISO date to enable date filtering — only designation features established or modified between `START_DATE` and `END_DATE` are downloaded and processed, and all output feature class names are suffixed with `_date_filter`. Each source in `sources_designations.csv` must have a `date_filter_query` entry for its features to be included in a date-filtered run — sources without a date-filterable field are excluded. Set this to the end date of the previous SARA 180-day report to capture all changes since the last submission. |
 | `END_DATE` | str | `""` | The end of the date filter window, in `YYYY-MM-DD` format. Only used when `START_DATE` is set. When `START_DATE` is set and `END_DATE` is `""`, defaults to today's date at runtime. |
 | `EXCLUDE_FEDERAL` | bool | `True` | When `True`, omits the three federal designation layers — National Parks (process_order 1), National Wildlife Areas (process_order 10), and Migratory Bird Sanctuaries (process_order 12) — from all pipeline steps. These layers originate from federal repositories with different update cycles and are excluded by default because the analysis focuses on provincially-managed lands. Set to `False` to include federal designations. |
+| `FEDERAL_ERASE` | bool | `True` | When `True`, `create_cha.py` builds a federal land mask (PMBC federal parcels, Indian Reserves, National Parks, National Wildlife Areas) and runs `PairwiseErase` on the Critical Habitat polygons before the designation intersection. The resulting `critical_habitat_area_post_fed_erase` feature class carries a `Cha_Area_Fed_Removed` field (post-erase geodesic hectares) which becomes the denominator for `Pct_of_Cha_Prot_by_LandDes`. Any CHA polygon that is entirely federal is diverted to `cha_fully_federal`. Independent of `EXCLUDE_FEDERAL`. Set to `False` to retain the raw ECCC geometry (passthrough mode). |
 | `SKIP_DOWNLOAD` | bool | `False` | When `True`, skips the WFS download step entirely and uses whatever `src_*` feature classes are already present in the working GDB (`designatedlands.gdb`). Useful when re-running processing steps after a completed download, or when testing changes to the vector processing logic without waiting for a fresh download. |
 | `SKIP_CLEANUP` | bool | `False` | When `True`, retains all intermediate feature classes (`src_*` raw downloads and `*_pp` preprocessed versions) in the working GDB after the pipeline completes. Useful for inspecting intermediate outputs or debugging a processing issue. When `False`, these are deleted at Step 7 to reclaim disk space. |
 | `RASTER` | bool | `False` | When `True`, runs the optional raster processing step (Step 5) after the vector outputs are complete. This converts designation polygons to four GeoTIFFs: `designatedlands.tif`, `forest_restriction.tif`, `og_restriction.tif`, and `mine_restriction.tif`. **Requires the ArcGIS Spatial Analyst extension** — the pipeline will fail at this step without it. Leave `False` if you only need vector outputs or do not have Spatial Analyst licensed. |
@@ -415,6 +425,7 @@ CHA_FILTER_OUT_WRS = False          # True = full CHA filter (FINAL + BC + exclu
 | `START_DATE` / `END_DATE` set, cleared, or window shifted | `src_*` layers were downloaded with (or without) a date filter; re-running will reuse them instead of fetching the corrected set. |
 | `EXCLUDE_FEDERAL` flipped `True` → `False` | Federal `src_*` layers are missing from the GDB and will stay missing unless a fresh download is forced. |
 | `CHA_FILTER_OUT_WRS` flipped, while `SKIP_DOWNLOAD = True` | `create_cha.py` runs inside the download step; skipping the download means the CHA feature class keeps its previous WRS filter state. Either run the reset, or set `SKIP_DOWNLOAD = False` for that run so CHA is re-prepared. |
+| `FEDERAL_ERASE` flipped, while `SKIP_DOWNLOAD = True` | The four `fed_mask_*` layers either weren't downloaded or weren't used last run; the CHA export still reflects the previous mode. Either reset or set `SKIP_DOWNLOAD = False` for that run. |
 | Any edit to `sources_designations.csv` (query, preprocess op, priority) | The affected `src_*` and `*_pp` layers no longer match the CSV logic. |
 
 **Safe re-runs (no reset needed):** rerunning with the same settings; toggling `SKIP_CLEANUP`, `RASTER`, `SKIP_VECTOR`, or the verbosity flags; re-running after `pipeline_reset.py` has just been run.
@@ -491,7 +502,7 @@ Defines all 42 designation layers. Each row configures one data source. Key colu
 
 ### `sources_supporting.csv`
 
-Defines 7 supporting layers used during processing (not designation layers themselves):
+Defines 11 supporting layers used during processing (not designation layers themselves):
 
 - **BCGS 1:20k Grid** (`tiles_20k`) — tile index for parallel processing
 - **NTS 250k Grid** (`tiles_250k`) — national topographic tile index
@@ -500,6 +511,10 @@ Defines 7 supporting layers used during processing (not designation layers thems
 - **Marine Ecosections** (`marine_ecosections`) — marine ecological zones
 - **Muskwa-Kechika Boundary** (`mk_boundary`) — management area for clipping
 - **Critical Habitat Area** (`critical_habitat_area`) — ECCC's Critical Habitat polygons (filtered to FINAL status, British Columbia, terrestrial species) used for the CHA intersection step
+- **PMBC Federal Parcels** (`fed_mask_pmbc_federal`) — federal-owned parcels from the ParcelMap BC fabric; component of the federal-erase mask
+- **Indian Reserves** (`fed_mask_indian_reserves`) — administrative boundaries of reserves; component of the federal-erase mask
+- **National Parks (Admin Boundaries)** (`fed_mask_national_parks`) — Parks Canada administrative boundaries; component of the federal-erase mask
+- **National Wildlife Areas** (`fed_mask_nwa`) — ECCC CPCAD 2025 NWA subset; component of the federal-erase mask
 
 
 ---
@@ -602,16 +617,25 @@ Provides date-based WFS queries and xlsx report generation using **openpyxl**:
 
 Resumes from the first incomplete step, or can be overridden with `--force-from STEP`.
 
-### `create_cha.py` — CHA Dataset Preparation
+### `create_cha.py` — CHA Dataset Preparation and Federal Erase
 
-Downloads and prepares the **Critical Habitat Area (CHA)** dataset from ECCC's national data portal:
+Downloads the **Critical Habitat Area (CHA)** dataset from ECCC and (optionally) erases federal land from it before the designation overlap step.
 
-- Reads the CHA entry from `sources_supporting.csv` (URL, definition query, field mappings).
-- Downloads `CriticalHabitat.zip` with retry logic (up to 3 attempts) and extracts the geodatabase into `source_data/`.
-- Applies the definition query to filter to **FINAL** status, **British Columbia** province, and (by default) excludes specified species. When called with `query_override`, uses the provided query instead of the CSV-defined one.
-- Extracts the zip into a temporary sibling directory, validates that the extracted geodatabase contains feature classes, and atomically moves it into `source_data/CriticalHabitat.gdb`. The geodatabase is stored under ONE canonical name (`CriticalHabitat.gdb`) — no rename to a second filename. If all download attempts fail, falls back to an existing local `source_data/CriticalHabitat.gdb` only if it contains feature classes; stale empty geodatabases are rejected.
+**Download / filter / export:**
+- Reads the CHA entry from `sources_supporting.csv` and downloads `CriticalHabitat.zip` with retry logic.
+- Extracts into a temporary sibling directory, validates the extracted geodatabase actually contains feature classes, and atomically moves it to `source_data/CriticalHabitat.gdb` under one canonical name. Stale/empty fallback copies are rejected.
+- Applies the definition query (FINAL + BC, plus the wide-ranging species exclusion when `CHA_FILTER_OUT_WRS = True`) and stamps the ECCC `OBJECTID` into `CHA_Source_ID` on the exported layer.
+- Exports to `source_data/cha_exported.gdb/critical_habitat_area_pre_fed_erase` and renames the original ECCC area field from `Area_ha` to `ECCC_Cha_Area_Ha`.
 
-Can be run standalone (`python create_cha.py`) or called from the pipeline via `prepare_cha()`.
+**Federal erase (new, controlled by `apply_federal_erase` / `FEDERAL_ERASE`):**
+- Looks up the four `fed_mask_*` layers in a mask GDB (default `designatedlands.gdb`) and validates each one exists, has >0 features, and sits in EPSG:3005. The NWA source is additionally checked against the raw NAD83 download in `source_data/`.
+- Copies each mask layer, stamps a `Fed_Source` label, then `Merge` → `RepairGeometry` → `PairwiseDissolve(multi_part="SINGLE_PART")` to produce `federal_exclusion_mask`.
+- Runs `PairwiseErase(critical_habitat_area_pre_fed_erase, federal_exclusion_mask, critical_habitat_area_post_fed_erase)` at the default XY tolerance (multipart kept) and adds `Cha_Area_Fed_Removed` (`AREA_GEODESIC HECTARES`).
+- Audits the erase: asserts `CHA_Source_ID` uniqueness pre- and post-erase, computes the set difference of IDs, verifies `post_count == pre_count − len(fully_removed)`, writes any wholly-federal CHA polygons to `cha_fully_federal`, and logs Σ-area before/after plus delta.
+- Requires an ArcGIS Pro **Standard** license (or higher) for `PairwiseErase` and **Advanced** for `PairwiseDissolve`; the module checks `arcpy.ProductInfo()` up front and raises a clear error if the license is insufficient.
+- All geoprocessing is wrapped in `arcpy.EnvManager(outputCoordinateSystem=SpatialReference(3005))` so standalone CLI runs match pipeline runs.
+
+Can be run standalone (`python create_cha.py --mask-gdb path/to/designatedlands.gdb` with an optional `--no-federal-erase` flag) or called from the pipeline via `prepare_cha(..., federal_mask_gdb=..., apply_federal_erase=...)`.
 
 ### `Create_CHA_AOI.py` — CHA with AOI Clip (Testing)
 
@@ -621,9 +645,10 @@ A testing variant of `create_cha.py` that adds an **Area of Interest (AOI)** cli
 
 Performs the spatial intersection between designated lands and CHA, then quantifies protection coverage:
 
-- `run_cha_intersection()` — Master function that intersects both `designations_planarized` and `designations_overlapping` with the CHA feature class.
-- Calculates geodesic overlap areas (hectares) on both intersect feature classes.
-- Adds `CHA_Protected_Pct` to each intersect feature for per-fragment protection percentages.
+- `run_cha_intersection()` — Intersects both `designations_planarized` and `designations_overlapping` with the (post-erase) `critical_habitat_area_post_fed_erase` feature class.
+- Validates up front that the CHA input carries `Cha_Area_Fed_Removed`; if missing (e.g., `SKIP_DOWNLOAD = True` reused a pre-federal-erase `cha_exported.gdb`) the step raises a `RuntimeError` with instructions to rerun with `SKIP_DOWNLOAD = False`.
+- Adds `Overlap_Area_Ha` (geodesic hectares) to each intersect feature class.
+- Adds `Pct_of_Cha_Prot_by_LandDes = safe_pct(Overlap_Area_Ha, Cha_Area_Fed_Removed) × 100` (capped at 100). The denominator is now the **post-erase** non-federal area, not the raw ECCC area.
 
 Can be run standalone or imported as a module from the pipeline.
 
@@ -701,9 +726,11 @@ Intersection of `designations_planarized` with CHA. Because planarized designati
 
 ### Per-feature `CHA_Protected_Pct`
 
-The intersect feature classes (`designations_planarized_cha` and `designations_overlapping_cha`) each contain a `CHA_Protected_Pct` field on every individual feature. This shows what fraction of the original CHA polygon is represented by that specific intersect fragment:
+The intersect feature classes (`designations_planarized_cha` and `designations_overlapping_cha`) each contain a `Pct_of_Cha_Prot_by_LandDes` field on every individual feature. This shows what fraction of the (post-federal-erase) CHA polygon is represented by that specific intersect fragment:
 
-$$\text{CHA\_Protected\_Pct} = \frac{\text{Overlap\_Area\_ha}}{\text{Area\_ha}} \times 100$$
+$$\text{Pct\_of\_Cha\_Prot\_by\_LandDes} = \frac{\text{Overlap\_Area\_Ha}}{\text{Cha\_Area\_Fed\_Removed}} \times 100$$
+
+Where `Cha_Area_Fed_Removed` is the geodesic hectare count of the Critical Habitat polygon **after** federal land has been erased. If `FEDERAL_ERASE = False` was used, this field still exists (set equal to the raw ECCC area in passthrough mode) so downstream readers never need to switch denominators.
 
 ### How CHA polygons are fragmented
 
@@ -711,13 +738,16 @@ The original CHA polygons enter the pipeline as whole, unfragmented geometries f
 
 - **Input**: 1 CHA polygon (500 ha) overlapping 3 designation areas (provincial park, OGMA, wildlife habitat area).
 - **After PairwiseIntersect**: 3 fragment rows (e.g., 180 ha + 220 ha + 100 ha = 500 ha total). Each fragment inherits:
-  - `Area_ha = 500` — the **original** CHA polygon area, carried through as an attribute (unchanged).
-  - `CHA_Source_ID` — the original ECCC `OBJECTID` of the CHA polygon (same value on all 3 fragments), joinable directly to `CriticalHabitat.gdb/CriticalHabitatArea` on `OBJECTID`.
-  - `Overlap_Area_ha` — the fragment's actual geometry area (180, 220, or 100 ha respectively).
+  - `ECCC_Cha_Area_Ha = 500` — the **original** ECCC area, carried through as a reference attribute (unchanged).
+  - `Cha_Area_Fed_Removed = <≤500>` — the post-erase geodesic area of the (possibly-trimmed) CHA polygon. Used as the denominator for `Pct_of_Cha_Prot_by_LandDes`.
+  - `CHA_Source_ID` — the original ECCC `OBJECTID` of the CHA polygon, joinable directly to `CriticalHabitat.gdb/CriticalHabitatArea` on `OBJECTID`.
+  - `Overlap_Area_Ha` — the fragment's actual geometry area (geodesic hectares).
   - `designation`, `process_order`, restriction fields from whichever designation the fragment falls within.
-- **Per-fragment percentage**: `CHA_Protected_Pct = Overlap_Area_ha / Area_ha × 100` (e.g., 180 / 500 = 36%).
+- **Per-fragment percentage**: `Pct_of_Cha_Prot_by_LandDes = Overlap_Area_Ha / Cha_Area_Fed_Removed × 100`.
 
 No additional CHA summary tables are generated by the current pipeline; analysis should use the intersect feature classes directly.
+
+**Federal-erase audit artefacts.** The `cha_exported.gdb` working geodatabase also contains `critical_habitat_area_pre_fed_erase` (the raw ECCC export, pre-erase), `federal_exclusion_sources` (merged mask inputs with a `Fed_Source` label), `federal_exclusion_mask` (dissolved multipart mask), and — when non-empty — `cha_fully_federal` (CHA polygons that were entirely consumed by the erase). These are not copied to `outputs/designatedlands_output.gdb` by default, but are available for QA.
 
 ### Backtracing to the CHA Polygon
 
@@ -729,7 +759,7 @@ To trace a row back to its source polygon, join `CHA_Source_ID` to `OBJECTID` in
 
 
 
-### Example output contents (verified run: 2026-03-24)
+### Example output contents (verified run: 2026-03-24; federal-erase step added October 2026 — a new run against the live BCGW/ECCC endpoints is required to re-verify output contents under the new flag)
 
 For the run logged in `logs/designatedlands_20260324_192326.log` (date filter active, federal layers excluded), the output geodatabase `outputs/designatedlands_output.gdb` contained the following objects:
 
@@ -758,6 +788,69 @@ When `RASTER = True`, four GeoTIFFs are produced in `outputs/`:
 
 Each raster includes an attribute table (`.tif.vat.dbf`).
 
+
+---
+
+## Appendix A — How the federal mask is built
+
+The federal-erase steps live in [create_cha.py](create_cha.py) inside `_federal_erase_pipeline()`. It runs only when `apply_federal_erase=True` (default) and after `critical_habitat_area_pre_fed_erase` has been exported.
+
+### Inputs — four federal-land sources
+
+Read from `designatedlands.gdb` (populated by `DL.download()` from the four `fed_mask_*` rows in the `sources_supporting.csv`):
+
+| FC name in `designatedlands.gdb` | `Fed_Source` label | Origin |
+|---|---|---|
+| `fed_mask_pmbc_federal` | `PMBC_Federal` | BCGW ParcelMap BC Parcel Fabric, filtered to `OWNER_TYPE = 'Federal'` |
+| `fed_mask_indian_reserves` | `Indian_Reserve` | BCGW CLAB Indian Reserves (admin boundaries) |
+| `fed_mask_national_parks` | `National_Park` | BCGW CLAB National Parks |
+| `fed_mask_nwa` | `NWA` | ECCC CPCAD 2025 — NWA subset (zip download) |
+
+**Validation on each input** (fails if any of the below checks fail):
+
+- `arcpy.Exists(src_path)` — layer is in the GDB
+- `GetCount > 0` — at least one feature (prevents silent under-erase)
+- `sr.factoryCode == 3005` — BC Albers only 
+- NWA extra: inspect the original ECCC download in `source_data/ProtectedConservedArea_2025.gdb`, confirm datum contains `North_American_1983` so NAD83 realisations aren't accidentally mixed with ITRF/WGS84.
+
+### Build steps (all inside `cha_exported.gdb`)
+
+```mermaid
+flowchart TD
+    A1[fed_mask_pmbc_federal] --> B1[CopyFeatures<br/>+Fed_Source='PMBC_Federal']
+    A2[fed_mask_indian_reserves] --> B2[CopyFeatures<br/>+Fed_Source='Indian_Reserve']
+    A3[fed_mask_national_parks] --> B3[CopyFeatures<br/>+Fed_Source='National_Park']
+    A4[fed_mask_nwa] --> B4[CopyFeatures<br/>+Fed_Source='NWA']
+    B1 --> C[Merge]
+    B2 --> C
+    B3 --> C
+    B4 --> C
+    C --> D[federal_exclusion_sources<br/>overlapping, Fed_Source preserved]
+    D --> E[RepairGeometry]
+    E --> F[PairwiseDissolve<br/>dissolve_field=None<br/>multi_part=SINGLE_PART]
+    F --> G[federal_exclusion_mask<br/>single-part, no attrs]
+    H[critical_habitat_area_pre_fed_erase] --> I[PairwiseErase]
+    G --> I
+    I --> J[critical_habitat_area_post_fed_erase]
+```
+
+1. **Stage copies** — each of the four `fed_mask_*` layers is copied into `cha_exported.gdb`using `CopyFeatures` as `_fed_mask_src_<label>` and stamped with a `Fed_Source` TEXT(32) field so the lineage of every polygon is traceable after the merge.
+2. **Merge** → `federal_exclusion_sources`. One FC containing every input polygon, each row still carrying its `Fed_Source` label. This is the auditable feature class so you can find "which input contributed this federal polygon?"
+3. **Clean up staged copies** — the four `_fed_mask_src_*` intermediates are deleted. On UNC file GDBs the delete can fail with "File read/write error" because `Merge` holds a schema lock on the inputs; the code calls `ClearWorkspaceCache` first and treats a residual delete failure as non-fatal (the whole `cha_exported.gdb` is recreated at the start of every `prepare_cha()` run, so orphans are wiped on the next run).
+4. **RepairGeometry** on `federal_exclusion_sources` so self-intersecting rings don't break the dissolve.
+5. **PairwiseDissolve** → creates the output called `federal_exclusion_mask`: `dissolve_field=None` and `multi_part="SINGLE_PART"`. Overlapping/adjacent federal polygons collapse to one row per discrete federal landmass, no attributes are carried through. This is the actual erase geometry. 
+6. **PairwiseErase**: `critical_habitat_area_pre_fed_erase` erased by `federal_exclusion_mask` creates → `critical_habitat_area_post_fed_erase` (the authoritative CHA used by `intersect_area_calc.py`).
+7. **Add `Cha_Area_Fed_Removed`** on the final FC via `CalculateGeometryAttributes AREA_GEODESIC HECTARES`. This is the post-erase non-federal area, used as the denominator for `Pct_of_Cha_Prot_by_LandDes`.
+8. **Audit** (`_audit_federal_erase`): asserts `CHA_Source_ID` uniqueness pre- and post-erase, computes `set(pre_ids) − set(post_ids)` to find CHA polygons that were entirely consumed by the erase, verifies `post_count == pre_count − len(fully_removed)`, and emits Σ-area pre/post/delta to the log. If any CHA polygons were wholly removed, they are exported with their original attributes to `cha_fully_federal` for species-at-risk audit.
+
+### Coordinate-system guarantees
+
+
+- All geoprocessing is wrapped in `arcpy.EnvManager(outputCoordinateSystem=arcpy.SpatialReference(3005))`
+
+### Edition stamp
+
+The NWA mask uses CPCAD edition 2025 (`ProtectedConservedArea_2025.gdb` / `ProtectedConservedArea_2025` layer). The URL, filename, and layer name in `sources_supporting.csv` all carry the year and need an annual bump when CPCAD publishes a new release.
 
 ---
 

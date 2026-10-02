@@ -2214,6 +2214,8 @@ def main():
         pipeline_options = {
             "date_filter_active": DL.date_filter_active,
             "exclude_federal": DL.exclude_federal,
+            # federal_erase is only set from main.py; CLI download does not run prepare_cha.
+            "federal_erase": None,
             "start_date": DL.start_date,
             "end_date": DL.end_date,
         }
