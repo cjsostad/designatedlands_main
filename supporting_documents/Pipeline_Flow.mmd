@@ -1,0 +1,66 @@
+%% Designated Lands pipeline workflow
+%% Source of truth: main.py (PIPELINE OPTIONS + step sequence), designatedlands.py,
+%% create_cha.py, intersect_area_calc.py, date_filter.py.
+%% Regenerate Pipeline_Flow.svg/.pdf from this file when the pipeline changes.
+flowchart TD
+    START([python main.py]) --> INIT["Initialise DesignatedLands<br/>load config + sources_designations.csv<br/>+ sources_supporting.csv"]
+    INIT --> S1["Step 1/7 — test-connection<br/>verify working File GDB is accessible"]
+
+    S1 --> SKIPDL{SKIP_DOWNLOAD?}
+    SKIPDL -- "True" --> PRECHECK
+    SKIPDL -- "False (default)" --> DL["Step 2/7 — download<br/>DL.download(overwrite=date_filter_active)"]
+
+    subgraph DOWNLOAD["Per-source acquisition (DL.download)"]
+        direction TB
+        DL --> ROUTE{Source URL type}
+        ROUTE -- "catalogue.data.gov.bc.ca" --> WFS["BCGW WFS GetFeature<br/>probe numberMatched; page if > 10000<br/>JSONToFeatures -> src_* FC (EPSG:3005)"]
+        ROUTE -- "zip / tar archive<br/>(http/https/ftp)" --> ARC["download_file: requests,<br/>curl.exe fallback on RemoteDisconnected<br/>extract -> load_file_to_gdb"]
+        ROUTE -- "ftp directory + .shp" --> SHP["download loose shapefile bundle<br/>(.shp/.shx/.dbf/.prj[/.cpg])<br/>-> load_file_to_gdb"]
+        ROUTE -- "manual_download = T" --> MAN["read pre-staged file from source_data/"]
+    end
+
+    WFS --> CHA
+    ARC --> CHA
+    SHP --> CHA
+    MAN --> CHA
+
+    subgraph CHABLOCK["Critical Habitat Area (prepare_cha)"]
+        direction TB
+        CHA["Download ECCC CriticalHabitat.zip<br/>apply definition query (FINAL + BC [+ WRS])<br/>stamp CHA_Source_ID; export *_pre_fed_erase"]
+        CHA --> FEDQ{FEDERAL_ERASE?}
+        FEDQ -- "True (default)" --> FED["Build federal_exclusion_mask<br/>4x fed_mask_* -> Merge -> Dissolve<br/>PairwiseErase -> critical_habitat_area_post_fed_erase<br/>add Cha_Area_Fed_Removed; audit; cha_fully_federal"]
+        FEDQ -- "False" --> NOFED["passthrough: copy pre-erase to final name<br/>Cha_Area_Fed_Removed = un-erased area"]
+    end
+
+    FED --> PRECHECK
+    NOFED --> PRECHECK
+
+    PRECHECK["Pre-check — verify_sources<br/>confirm expected src_* present in GDB"]
+
+    PRECHECK --> SKIPPP{SKIP_PREPROCESS?}
+    SKIPPP -- "True" --> SKIPVEC
+    SKIPPP -- "False (default)" --> PP["Step 3/7 — preprocess<br/>per-source dissolve / clip (*_pp)"]
+    PP --> BCB["create_bc_boundary<br/>merge land + marine, union, dissolve"]
+    BCB --> SKIPVEC
+
+    SKIPVEC{SKIP_VECTOR?}
+    SKIPVEC -- "True" --> CHAINT
+    SKIPVEC -- "False (default)" --> OVL["Step 4/7 — designations_overlapping<br/>clip each source to bc_boundary_land, stack"]
+    OVL --> PLN["designations_planarized<br/>Union + rank: lowest process_order wins,<br/>restriction = max across overlaps"]
+    PLN --> CHAINT
+
+    CHAINT["run_cha_intersection<br/>PairwiseIntersect designations x CHA<br/>Overlap_Area_Ha; Pct_of_Cha_Prot_by_LandDes"]
+    CHAINT --> REPORT["run_report<br/>write designated_lands_pipeline_report.xlsx"]
+
+    REPORT --> RASTERQ{RASTER?}
+    RASTERQ -- "True (Spatial Analyst)" --> RAST["Step 5/7 — rasterize + overlay_rasters"]
+    RASTERQ -- "False (default)" --> DUMP
+    RAST --> DUMP
+
+    DUMP["Step 6/7 — dump<br/>export outputs to<br/>outputs/designatedlands_output.gdb"]
+    DUMP --> SKIPCLEAN{SKIP_CLEANUP?}
+    SKIPCLEAN -- "True (default)" --> DONE
+    SKIPCLEAN -- "False" --> CLEAN["Step 7/7 — cleanup<br/>drop intermediate src_*/*_pp FCs"]
+    CLEAN --> DONE
+
+    DONE([Pipeline complete])

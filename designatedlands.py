@@ -31,6 +31,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -41,7 +42,7 @@ from functools import wraps
 from datetime import date, datetime
 from math import ceil
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import numpy as np
 import pandas as pd
@@ -325,9 +326,56 @@ def _rmtree_robust(path: str) -> None:
             pass
     shutil.rmtree(path, onerror=_on_error)
 
+
+def _download_ftp_shapefile(url: str, out_folder: str, filename: str) -> None:
+    """Download a loose shapefile bundle from an FTP directory URL."""
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    required_extensions = (".shp", ".shx", ".dbf", ".prj")
+    optional_extensions = (".cpg",)
+    cache_parent = os.path.dirname(out_folder) or "."
+    Path(cache_parent).mkdir(parents=True, exist_ok=True)
+    staging_folder = tempfile.mkdtemp(prefix=".shapefile_", dir=cache_parent)
+
+    try:
+        for extension in required_extensions + optional_extensions:
+            component = stem + extension
+            component_url = url.rstrip("/") + "/" + quote(component)
+            component_path = os.path.join(staging_folder, component)
+            try:
+                with urllib.request.urlopen(component_url, timeout=60) as response:
+                    with open(component_path, "wb") as output:
+                        shutil.copyfileobj(response, output)
+            except urllib.error.URLError as exc:
+                if extension in optional_extensions:
+                    LOG.info("Optional shapefile sidecar unavailable: %s", component_url)
+                    continue
+                raise RuntimeError(
+                    f"Could not download required shapefile component {component_url}: {exc}"
+                ) from exc
+
+            if os.path.getsize(component_path) == 0:
+                raise RuntimeError(f"Downloaded shapefile component is empty: {component_url}")
+            LOG.info("Downloaded shapefile component %s (%d bytes)", component, os.path.getsize(component_path))
+
+        for extension in (".shp", ".shx"):
+            component_path = os.path.join(staging_folder, stem + extension)
+            with open(component_path, "rb") as component_file:
+                file_code = component_file.read(4)
+            if file_code != b"\x00\x00\x27\x0a":
+                raise RuntimeError(
+                    f"Downloaded {stem + extension} does not have a valid shapefile header."
+                )
+
+        os.replace(staging_folder, out_folder)
+    except Exception:
+        if os.path.exists(staging_folder):
+            _rmtree_robust(staging_folder)
+        raise
+
+
 def download_file(url: str, path: str, filename: str, overwrite: bool = False):
     """
-    Download a zip/tar archive from *url* and extract it.
+    Download and extract an archive, or download a loose FTP shapefile bundle.
     Returns: (local_file_path, extracted_folder)
     The extract folder uses a short readable source name plus a short URL hash
     so cached downloads remain unique but easier to inspect.
@@ -348,32 +396,71 @@ def download_file(url: str, path: str, filename: str, overwrite: bool = False):
     if not os.path.exists(out_folder):
         LOG.info("Downloading %s", url)
         parsed = urlparse(url)
-        suffix = os.path.splitext(parsed.path)[1] or ".zip"
-        fp = tempfile.NamedTemporaryFile("wb", suffix=suffix, delete=False)
-        try:
-            if parsed.scheme in ("http", "https"):
-                resp = requests.get(url, stream=True, verify=False, timeout=(30, 300))
-                resp.raise_for_status()
-                for chunk in resp.iter_content(chunk_size=8192):
-                    fp.write(chunk)
-            elif parsed.scheme == "ftp":
-                with urllib.request.urlopen(url) as download:
-                    while True:
-                        buf = download.read(8192)
-                        if not buf:
-                            break
-                        fp.write(buf)
-            else:
-                raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
-        finally:
-            fp.close()
+        if (
+            parsed.scheme == "ftp"
+            and parsed.path.endswith("/")
+            and filename.lower().endswith(".shp")
+        ):
+            _download_ftp_shapefile(url, out_folder, filename)
+        else:
+            suffix = os.path.splitext(parsed.path)[1] or ".zip"
+            fp = tempfile.NamedTemporaryFile("wb", suffix=suffix, delete=False)
+            try:
+                if parsed.scheme in ("http", "https"):
+                    try:
+                        with requests.get(
+                            url, stream=True, verify=False, timeout=(30, 300)
+                        ) as resp:
+                            resp.raise_for_status()
+                            for chunk in resp.iter_content(chunk_size=8192):
+                                fp.write(chunk)
+                    except requests.RequestException as request_error:
+                        curl_executable = "curl.exe" if os.name == "nt" else "curl"
+                        LOG.warning(
+                            "Python HTTP download failed for %s: %s. Retrying with %s.",
+                            url, request_error, curl_executable,
+                        )
+                        fp.close()
+                        try:
+                            subprocess.run(
+                                [
+                                    curl_executable,
+                                    "--retry", "3",
+                                    "--retry-all-errors",
+                                    "--location",
+                                    "--fail",
+                                    "--silent",
+                                    "--show-error",
+                                    "--output", fp.name,
+                                    url,
+                                ],
+                                check=True,
+                                capture_output=True,
+                                text=True,
+                                timeout=360,
+                            )
+                        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as curl_error:
+                            raise RuntimeError(
+                                f"Python and curl downloads both failed for {url}: {curl_error}"
+                            ) from curl_error
+                elif parsed.scheme == "ftp":
+                    with urllib.request.urlopen(url) as download:
+                        while True:
+                            buf = download.read(8192)
+                            if not buf:
+                                break
+                            fp.write(buf)
+                else:
+                    raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
+            finally:
+                fp.close()
 
-        Path(out_folder).mkdir(parents=True, exist_ok=True)
-        LOG.info("Extracting %s to %s", fp.name, out_folder)
-        archive = get_compressed_file_wrapper(fp.name)
-        archive.extractall(out_folder)
-        archive.close()
-        os.unlink(fp.name)
+            Path(out_folder).mkdir(parents=True, exist_ok=True)
+            LOG.info("Extracting %s to %s", fp.name, out_folder)
+            archive = get_compressed_file_wrapper(fp.name)
+            archive.extractall(out_folder)
+            archive.close()
+            os.unlink(fp.name)
 
     resolved_file = resolve_extracted_path(out_folder, filename)
     if resolved_file != out_file:
