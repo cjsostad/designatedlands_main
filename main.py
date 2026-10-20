@@ -50,6 +50,7 @@ Usage:
     python main.py --verbose
 """
 import argparse
+import csv
 import logging
 import os
 import sys
@@ -84,6 +85,52 @@ def build_parser():
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--quiet", "-q", action="store_true")
     return parser
+
+
+DATE_FILTER_COLUMN = "date_filter_query"
+
+
+def _require_date_filter_column(csv_path):
+    """Abort with a clear message if the date filter is active but the
+    sources CSV is missing the ``date_filter_query`` column.
+
+    Without that column every designation layer is treated as
+    "no date field available" and silently excluded, producing an empty
+    output table. This usually happens when sources_designations.csv is
+    replaced by a copy that dropped the column.
+    """
+    try:
+        with open(csv_path, encoding="utf-8") as f:
+            header = csv.DictReader(f).fieldnames or []
+    except OSError as exc:
+        print(f"\n[ERROR] Could not read sources file '{csv_path}': {exc}\n")
+        sys.exit(1)
+
+    if DATE_FILTER_COLUMN in header:
+        return
+
+    print("\n" + "=" * 70)
+    print("  DATE FILTER ENABLED, BUT REQUIRED COLUMN IS MISSING")
+    print("=" * 70)
+    print("  The date filter is turned on (START_DATE is set), but the")
+    print(f"  '{DATE_FILTER_COLUMN}' column was not found in:")
+    print(f"      {csv_path}")
+    print()
+    print("  Without this column every designation layer is treated as")
+    print("  'no date field available' and excluded, so the output")
+    print("  table comes out empty.")
+    print()
+    print("  To fix this, either:")
+    print(f"    - Restore the '{DATE_FILTER_COLUMN}' column (with each")
+    print("      layer's date query) to the sources CSV, or")
+    print('    - Disable the date filter by setting START_DATE = "" in')
+    print("      the PIPELINE OPTIONS block of main().")
+    print("=" * 70 + "\n")
+    LOG.error(
+        "Date filter active but '%s' column missing from %s; aborting.",
+        DATE_FILTER_COLUMN, csv_path,
+    )
+    sys.exit(1)
 
 
 def main():
@@ -202,6 +249,12 @@ def main():
     print(f"[INIT] Loaded {len(DL.sources)} designation sources")
 
     print(f"[INIT] GDB: {DL.gdb}\n")
+
+    # Fail fast if the date filter is on but the sources CSV lost its
+    # date_filter_query column (otherwise every layer is silently
+    # excluded and the outputs come back empty).
+    if date_filter_active:
+        _require_date_filter_column(DL.config["sources_designations"])
 
     # ---------------------------------
     # STEP 1
