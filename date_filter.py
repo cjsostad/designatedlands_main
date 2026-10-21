@@ -731,32 +731,80 @@ def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
     # ==================== CHA result sheets ====================
     # Non-spatial dumps of the two CHA intersection feature classes so the
     # workbook is a self-contained audit trail of the run's CHA outputs.
+    # 2026-09-21: Client-requested spreadsheet formatting changes applied here.
+    # This section adjusts the CHA Excel output only (drop columns, rename
+    # headers, hide selected columns); it does not modify the underlying
+    # feature classes in the geodatabase.
     def _append_cha_sheet(sheet_name, rows, field_names, total_rows, truncated):
         if not rows or not field_names:
             return
+
+        # Spreadsheet-only field cleanup; does NOT change the source GDB layers
+        drop_cols = {
+            "FID_critical_habitat_area",
+            "COSEWIC_ID",
+            "SARA_Agency",
+            "GridID",
+            "Sensitive_E",
+            "RDoc_Name_E",
+            "RD_Status",
+            
+        }
+        rename_map = {
+            "FID_designations_planarized": "OID_designations_planarized_new",
+            "process_order": "Process Order (OECM)",
+            "designation": "Designation (Highest Protection)",
+            "overlapping_designations": "Additional Overlapping Designations",
+            "MigBird": "Migratory Bird (1=Yes, 2=No)",
+            "Type_E": "CH Type",
+        }
+
+        visible_fields = [
+            {"orig": fn, "display": rename_map.get(fn, fn)}
+            for fn in field_names
+            if fn not in drop_cols
+        ]
+
         ws_cha = wb.create_sheet(sheet_name)
-        ws_cha.append(list(field_names))
-        for col_idx in range(1, len(field_names) + 1):
+        ws_cha.append([f["display"] for f in visible_fields])
+
+        hidden_field = "OBJECTID"
+        hidden_idx = next(
+            (i for i, f in enumerate(visible_fields, start=1) if f["orig"] == hidden_field),
+            None
+        )
+        if hidden_idx is not None:
+            col_letter = ws_cha.cell(row=1, column=hidden_idx).column_letter
+            ws_cha.column_dimensions[col_letter].hidden = True
+
+        for col_idx in range(1, len(visible_fields) + 1):
             cell = ws_cha.cell(row=1, column=col_idx)
             cell.font = header_font
             cell.fill = header_fill
             cell.alignment = header_align
+
         for r in rows:
-            ws_cha.append([r.get(fn, "") for fn in field_names])
+            ws_cha.append([
+                r.get(f["orig"], "")
+                for f in visible_fields
+            ])
+
         if truncated:
             ws_cha.append([])
             limit = (pipeline_options or {}).get("cha_report_row_limit", len(rows))
             banner = (
-                f"Showing first {limit:,} of {total_rows:,} rows \u2014 "
+                f"Showing first {limit:,} of {total_rows:,} rows — "
                 f"full table is in the output geodatabase."
             )
             ws_cha.append([banner])
             ws_cha.cell(row=ws_cha.max_row, column=1).font = Font(italic=True, bold=True)
+
         ws_cha.freeze_panes = "A2"
-        for col_idx in range(1, len(field_names) + 1):
+        for col_idx in range(1, len(visible_fields) + 1):
             ws_cha.column_dimensions[
                 ws_cha.cell(row=1, column=col_idx).column_letter
             ].width = 22
+
 
     opts_cha = pipeline_options or {}
     _append_cha_sheet(
