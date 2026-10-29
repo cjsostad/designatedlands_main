@@ -1607,13 +1607,33 @@ class DesignatedLands:
                 LOG.warning("Source not found, skipping: %s", src_fc)
                 continue
 
+            # arcpy.Exists can return True for an empty/stale artifact that is
+            # not a usable feature class (e.g. a date-filtered layer that
+            # returned 0 features). Confirm it is a real FC before clipping.
+            try:
+                desc = arcpy.Describe(src_fc)
+                if getattr(desc, "dataType", "") not in ("FeatureClass", "FeatureLayer"):
+                    LOG.warning(
+                        "Source is not a feature class, skipping: %s", src_fc
+                    )
+                    continue
+            except Exception:
+                LOG.warning("Source could not be described, skipping: %s", src_fc)
+                continue
+
             LOG.info("Inserting %s into %s", source["designation"], fc_name)
 
             # Clip source to bc_boundary_land first
             clipped_tmp = os.path.join(self.gdb, "clip_tmp")
             if arcpy.Exists(clipped_tmp):
                 arcpy.management.Delete(clipped_tmp)
-            arcpy.analysis.Clip(src_fc, bc_land, clipped_tmp)
+            try:
+                arcpy.analysis.Clip(src_fc, bc_land, clipped_tmp)
+            except arcpy.ExecuteError:
+                LOG.warning(
+                    "Clip failed for %s — skipping this source", src_fc
+                )
+                continue
 
             # Determine source id/name fields
             src_id_col = source.get("source_id_col", "")
@@ -1662,6 +1682,18 @@ class DesignatedLands:
                     "Could not delete temp FC %s — will be cleaned up on next iteration",
                     clipped_tmp,
                 )
+
+        # Total_Contributing_Des_Area (option A): full BC-clipped geodesic area of
+        # each source designation feature. Each row here IS one source feature, so
+        # its own geometry area is the contributing-designation area. Computed once
+        # here; it then rides through PairwiseIntersect (join_attributes="ALL") into
+        # designations_overlapping_cha.
+        arcpy.management.AddField(out_fc, "Total_Contributing_Des_Area", "DOUBLE")
+        arcpy.management.CalculateGeometryAttributes(
+            out_fc,
+            [["Total_Contributing_Des_Area", "AREA_GEODESIC"]],
+            area_unit="HECTARES",
+        )
 
         # Build spatial index
         arcpy.management.AddSpatialIndex(out_fc)
@@ -1732,6 +1764,7 @@ class DesignatedLands:
             ("forest_restriction_max", "SHORT", None),
             ("mine_restriction_max", "SHORT", None),
             ("og_restriction_max", "SHORT", None),
+            ("Total_Contributing_Des_Area", "DOUBLE", None),
         ]
         for fname, ftype, flen in planar_fields:
             if flen:
@@ -1743,6 +1776,7 @@ class DesignatedLands:
             "process_order", "designation", "overlapping_designations",
             "source_id", "source_name",
             "forest_restriction_max", "mine_restriction_max", "og_restriction_max",
+            "Total_Contributing_Des_Area",
             "SHAPE@",
         ]
 
@@ -1779,12 +1813,13 @@ class DesignatedLands:
         read_fields = [
             "process_order", "designation", "source_id", "source_name",
             "forest_restriction", "og_restriction", "mine_restriction",
+            "Total_Contributing_Des_Area",
             "SHAPE@",
         ]
         frag_count = 0
 
         with arcpy.da.SearchCursor(union_tmp, read_fields) as cur:
-            for po, desig, src_id, src_name, fr, og, mr, geom in cur:
+            for po, desig, src_id, src_name, fr, og, mr, des_area, geom in cur:
                 if geom is None or geom.area == 0:
                     continue
                 if po is None or int(po) <= 0:
@@ -1795,6 +1830,7 @@ class DesignatedLands:
                 fr = fr if fr is not None else 0
                 og = og if og is not None else 0
                 mr = mr if mr is not None else 0
+                des_area = des_area if des_area is not None else 0.0
                 desig = desig or ""
                 src_id = str(src_id).strip() if src_id not in (None, "") else ""
                 src_name = str(src_name).strip() if src_name not in (None, "") else ""
@@ -1815,6 +1851,7 @@ class DesignatedLands:
                         "min_po": po,
                         "winner_source_id": src_id,
                         "winner_source_name": src_name,
+                        "winner_des_area": des_area,
                         "max_fr": fr,
                         "max_og": og,
                         "max_mr": mr,
@@ -1827,6 +1864,7 @@ class DesignatedLands:
                         g["min_po"] = po
                         g["winner_source_id"] = src_id
                         g["winner_source_name"] = src_name
+                        g["winner_des_area"] = des_area
                     elif po == g["min_po"]:
                         # Deterministic tie-break: prefer populated source fields,
                         # then lexicographically smallest values.
@@ -1845,6 +1883,7 @@ class DesignatedLands:
                         if candidate_key < current_key:
                             g["winner_source_id"] = src_id
                             g["winner_source_name"] = src_name
+                            g["winner_des_area"] = des_area
                     g["max_fr"] = max(g["max_fr"], fr)
                     g["max_og"] = max(g["max_og"], og)
                     g["max_mr"] = max(g["max_mr"], mr)
@@ -1881,6 +1920,7 @@ class DesignatedLands:
                     data["max_fr"],
                     data["max_mr"],
                     data["max_og"],
+                    data.get("winner_des_area", 0.0),
                     data["geom"],
                 ])
 
