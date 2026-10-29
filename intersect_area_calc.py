@@ -305,6 +305,243 @@ def run_cha_intersection(
     return result
 
 
+# arcpy Field.type -> AddField field_type, so a mirrored field keeps its lineage type.
+_FIELD_TYPE_MAP = {
+    "SmallInteger": "SHORT",
+    "Integer": "LONG",
+    "BigInteger": "BIGINTEGER",
+    "Single": "FLOAT",
+    "Double": "DOUBLE",
+    "String": "TEXT",
+    "Date": "DATE",
+    "OID": "LONG",
+    "GUID": "GUID",
+    "Guid": "GUID",
+    "GlobalID": "GUID",
+}
+
+
+def run_cha_unprotected_summary(
+    cha_fc,
+    designations_fc,
+    overlapping_intersect_fc,
+    output_gdb,
+    summary_out_name="cha_unprotected_summary",
+    remainder_out_name="cha_prov_unprotected_geom",
+):
+    """
+    Per-CHA 'unprotected by anyone' summary.
+
+    cha_fc : post-federal-erase CHA (critical_habitat_area_post_fed_erase),
+             one row per surviving CHA_Source_ID, carrying CHA_Source_ID,
+             ECCC_Cha_Area_Ha, Cha_Area_Fed_Removed.
+    designations_fc : designations_planarized{suffix}. Planarized is already
+             non-overlapping and covers exactly the same ground as the union
+             of ALL designations (any designation = protection), so dissolving
+             it is the full provincial-protection footprint and is far cheaper
+             than dissolving the overlapping stack.
+    overlapping_intersect_fc : designations_overlapping_cha — used only to find
+             which CHA_Source_IDs have ANY designation overlap (bucket B vs C).
+    """
+    arcpy.env.overwriteOutput = True
+    arcpy.env.parallelProcessingFactor = "100%"
+    ensure_file_gdb(output_gdb, recreate_invalid=True, logger=LOG)
+    if not is_file_gdb(output_gdb):
+        raise RuntimeError(f"Output path is not a valid File Geodatabase: {output_gdb}")
+
+    summary_table = os.path.join(output_gdb, summary_out_name)
+    remainder_fc = os.path.join(output_gdb, remainder_out_name)
+    mask_tmp = os.path.join(output_gdb, "cha_prov_protection_mask_tmp")
+
+    print("=" * 60)
+    print("  CHA UNPROTECTED (PROVINCIAL) SUMMARY")
+    print("=" * 60)
+    print(f"  CHA (post-fed-erase)  : {cha_fc}")
+    print(f"  Designations (planar) : {designations_fc}")
+    print(f"  Overlapping intersect : {overlapping_intersect_fc}")
+    print(f"  Output GDB            : {output_gdb}")
+    print(f"  Summary table         : {summary_out_name}")
+    print(f"  Remainder geometry    : {remainder_out_name}")
+    print("=" * 60)
+
+    LOG.info("CHA unprotected summary starting")
+    LOG.info("  CHA FC          : %s", cha_fc)
+    LOG.info("  Designations FC : %s", designations_fc)
+    LOG.info("  Overlapping FC  : %s", overlapping_intersect_fc)
+    LOG.info("  Output GDB      : %s", output_gdb)
+
+    for label, path in [
+        ("CHA", cha_fc),
+        ("Designations", designations_fc),
+        ("Overlapping intersect", overlapping_intersect_fc),
+    ]:
+        if not arcpy.Exists(path):
+            msg = f"ERROR: {label} not found at: {path}"
+            print(msg)
+            LOG.error(msg)
+            raise FileNotFoundError(msg)
+
+    # --------------------------------------------------
+    # 1. PROTECTION MASK
+    #    Dissolve the planarized stack (already non-overlapping) into a
+    #    single multipart "all provincial protection" polygon.
+    # --------------------------------------------------
+    print("\n[Step 1/5] Dissolving planarized designations into protection mask...")
+    LOG.info("PairwiseDissolve: planarized -> %s", mask_tmp)
+    if arcpy.Exists(mask_tmp):
+        arcpy.management.Delete(mask_tmp)
+    arcpy.analysis.PairwiseDissolve(designations_fc, mask_tmp)
+
+    # --------------------------------------------------
+    # 2. SECOND ERASE
+    #    Erase all provincial protection from the post-federal-erase CHA.
+    #    The remainder is the unprotected-by-anyone geometry, one multipart
+    #    row per CHA_Source_ID that still has any area left.
+    # --------------------------------------------------
+    print("[Step 2/5] Erasing protection mask from CHA (unprotected remainder)...")
+    LOG.info("PairwiseErase: CHA - mask -> %s", remainder_fc)
+    if arcpy.Exists(remainder_fc):
+        arcpy.management.Delete(remainder_fc)
+    arcpy.analysis.PairwiseErase(cha_fc, mask_tmp, remainder_fc)
+
+    # --------------------------------------------------
+    # 3. REMAINDER AREA (geodesic hectares)
+    # --------------------------------------------------
+    print("[Step 3/5] Calculating geodesic area of unprotected remainder...")
+    if "Prov_Unprotect_Cha_Area" not in [f.name for f in arcpy.ListFields(remainder_fc)]:
+        arcpy.management.AddField(remainder_fc, "Prov_Unprotect_Cha_Area", "DOUBLE")
+    arcpy.management.CalculateGeometryAttributes(
+        remainder_fc,
+        [["Prov_Unprotect_Cha_Area", "AREA_GEODESIC"]],
+        area_unit="HECTARES",
+    )
+
+    # --------------------------------------------------
+    # 4. REMAINDER AREA BY CHA_Source_ID
+    # --------------------------------------------------
+    unprot_by_id = {}
+    with arcpy.da.SearchCursor(
+        remainder_fc, ["CHA_Source_ID", "Prov_Unprotect_Cha_Area"]
+    ) as cur:
+        for cid, area in cur:
+            unprot_by_id[cid] = area if area is not None else 0.0
+    LOG.info("Unprotected remainder rows: %d", len(unprot_by_id))
+
+    # --------------------------------------------------
+    # 5. CHA_Source_IDs with ANY designation overlap (bucket B vs C)
+    # --------------------------------------------------
+    overlapped_ids = set()
+    with arcpy.da.SearchCursor(overlapping_intersect_fc, ["CHA_Source_ID"]) as cur:
+        for (cid,) in cur:
+            overlapped_ids.add(cid)
+    LOG.info("CHA_Source_IDs with >=1 designation overlap: %d", len(overlapped_ids))
+
+    # --------------------------------------------------
+    # 6. CREATE SUMMARY TABLE (standalone, no geometry)
+    #    Fully-covered CHAs have no remainder geometry, so the summary is a
+    #    table; the mappable geometry lives in remainder_fc.
+    # --------------------------------------------------
+    print("[Step 4/5] Creating summary table...")
+    if arcpy.Exists(summary_table):
+        arcpy.management.Delete(summary_table)
+    arcpy.management.CreateTable(output_gdb, summary_out_name)
+
+    # Mirror CHA_Source_ID type from cha_fc (its ECCC-OBJECTID lineage key).
+    cha_id_field = next(
+        f for f in arcpy.ListFields(cha_fc) if f.name == "CHA_Source_ID"
+    )
+    id_add_type = _FIELD_TYPE_MAP.get(cha_id_field.type, "LONG")
+    if id_add_type == "TEXT":
+        arcpy.management.AddField(
+            summary_table, "CHA_Source_ID", "TEXT",
+            field_length=cha_id_field.length,
+        )
+    else:
+        arcpy.management.AddField(summary_table, "CHA_Source_ID", id_add_type)
+
+    arcpy.management.AddField(summary_table, "ECCC_Cha_Area_Ha", "DOUBLE")
+    arcpy.management.AddField(summary_table, "Cha_Area_Fed_Removed", "DOUBLE")
+    arcpy.management.AddField(summary_table, "Prov_Unprotect_Cha_Area", "DOUBLE")
+    arcpy.management.AddField(
+        summary_table, "Fed_Prov_Unprotect_Cha_Pct", "DOUBLE",
+        field_alias="Fed_Prov_Unprotect_Ch_%",
+    )
+    arcpy.management.AddField(summary_table, "No_Protection_Area_Ha", "DOUBLE")
+    arcpy.management.AddField(summary_table, "No_Protection_Area_Pct", "DOUBLE")
+
+    # --------------------------------------------------
+    # 7. POPULATE, driven by cha_fc (one row per surviving CHA)
+    # --------------------------------------------------
+    print("[Step 5/5] Populating summary rows...")
+    insert_fields = [
+        "CHA_Source_ID", "ECCC_Cha_Area_Ha", "Cha_Area_Fed_Removed",
+        "Prov_Unprotect_Cha_Area", "Fed_Prov_Unprotect_Cha_Pct",
+        "No_Protection_Area_Ha", "No_Protection_Area_Pct",
+    ]
+    inserted = 0
+    with arcpy.da.InsertCursor(summary_table, insert_fields) as i_cur:
+        with arcpy.da.SearchCursor(
+            cha_fc, ["CHA_Source_ID", "ECCC_Cha_Area_Ha", "Cha_Area_Fed_Removed"]
+        ) as s_cur:
+            for cid, eccc, fed_removed in s_cur:
+                prov_unprot = unprot_by_id.get(cid, 0.0)  # 0 when fully provincially covered
+                # Denominator is the FULL original ECCC_Cha_Area_Ha (not
+                # Cha_Area_Fed_Removed): the federal slice sits in the
+                # denominator as protected area. Cap at 100 to absorb
+                # geodesic-vs-ECCC method differences (same reason create_cha's
+                # audit allows post > pre on individual rows).
+                pct = min((prov_unprot / eccc) * 100, 100.0) if eccc else None
+                if cid not in overlapped_ids:  # bucket C: no designation overlap at all
+                    no_prot_ha, no_prot_pct = prov_unprot, pct
+                else:  # bucket B: leave No_Protection_* null
+                    no_prot_ha, no_prot_pct = None, None
+                i_cur.insertRow([
+                    cid, eccc, fed_removed, prov_unprot, pct,
+                    no_prot_ha, no_prot_pct,
+                ])
+                inserted += 1
+
+    LOG.info("Summary rows inserted: %d", inserted)
+
+    # Clean up the temporary protection mask (remainder_fc is kept).
+    try:
+        arcpy.management.Delete(mask_tmp)
+    except Exception:
+        LOG.warning("Could not delete temp mask %s", mask_tmp)
+
+    # --------------------------------------------------
+    # Return rows for the next prompt to consume (same shape as
+    # run_cha_intersection's *_rows), plus the join keys it needs.
+    # --------------------------------------------------
+    summary_field_names = [
+        f.name for f in arcpy.ListFields(summary_table)
+        if f.type not in ("Geometry", "Blob", "Raster")
+        and f.name.upper() not in ("OBJECTID", "SHAPE", "SHAPE_LENGTH", "SHAPE_AREA")
+    ]
+    summary_rows = []
+    with arcpy.da.SearchCursor(summary_table, summary_field_names) as cur:
+        for row in cur:
+            summary_rows.append(dict(zip(summary_field_names, row)))
+
+    print("\n" + "=" * 60)
+    print("  CHA UNPROTECTED SUMMARY COMPLETE")
+    print("=" * 60)
+    print(f"  Summary table   : {summary_table} ({inserted} rows)")
+    print(f"  Remainder geom  : {remainder_fc}")
+    print("=" * 60)
+    LOG.info("CHA unprotected summary complete - %d rows", inserted)
+
+    return {
+        "summary_table": summary_table,
+        "remainder_fc": remainder_fc,
+        "summary_rows": summary_rows,
+        "summary_field_names": summary_field_names,
+        "summary_total_rows": inserted,
+        "unprot_by_id": unprot_by_id,
+        "overlapped_ids": overlapped_ids,
+    }
+
+
 # --------------------------------------------------
 # Standalone mode
 # --------------------------------------------------

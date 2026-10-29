@@ -59,7 +59,7 @@ import arcpy
 
 from designatedlands import DesignatedLands, log_arcpy_messages, set_log_level
 from create_cha import prepare_cha   # <-- import CHA script (retry + fallback, no AOI)
-from intersect_area_calc import run_cha_intersection
+from intersect_area_calc import run_cha_intersection, run_cha_unprotected_summary
 from date_filter import run_report
 from gdb_utils import ensure_file_gdb
 
@@ -394,6 +394,15 @@ def main():
         overlapping_out_name=f"designations_overlapping{dl_suffix}_cha_{date_suffix}",
         return_rows=True,
         row_limit=CHA_REPORT_ROW_LIMIT,
+    )
+
+    cha_unprot = run_cha_unprotected_summary(
+        cha_fc=cha_fc,
+        designations_fc=planarized_fc,
+        overlapping_intersect_fc=cha_result["overlapping_intersect"],
+        output_gdb=output_gdb,
+        summary_out_name=f"cha_unprotected_summary{dl_suffix}_{date_suffix}",
+        remainder_out_name=f"cha_prov_unprotected_geom{dl_suffix}_{date_suffix}",
     )
 
     print("[Step 4/7] CHA intersection and area calculation complete.")
