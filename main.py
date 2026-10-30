@@ -68,6 +68,7 @@ from gdb_utils import ensure_file_gdb
 # If a CHA intersect FC has more rows than this, only the first N are
 # written and a banner row points back to the GDB for the full table.
 CHA_REPORT_ROW_LIMIT = 100_000
+# TODO (not implemented): full run ~355k planarized / ~279k overlapping rows exceed this 100k cap, so the xlsx fragment sheets are a partial slice. Options to decide: analyze from the output GDB, raise the limit (fits under Excel's ~1.05M), or aggregate to one row per CHA_Source_ID.
 
 LOG = logging.getLogger(__name__)
 
@@ -151,9 +152,9 @@ def main():
     END_DATE       = ""   # End of date window (YYYY-MM-DD) or "" for today
     EXCLUDE_FEDERAL = True          # Drop federal designation layers (NP, NWA, MBS) from the creation of Land Designations Stack
     FEDERAL_ERASE  = True           # Erase federal land (PMBC fed, IRs, NPs, NWAs) from CHA before intersect, Independent of EXCLUDE_FEDERAL (that one gates designation sources; this one gates CHA geometry).
-    SKIP_DOWNLOAD  = False          # True = skip WFS download (use existing data in GDB)
-    SKIP_PREPROCESS = False         # True = skip preprocess + BC boundary (use existing pp layers)
-    SKIP_VECTOR    = False          # True = skip vector build (use designations_overlapping/planarized already in GDB)
+    SKIP_DOWNLOAD  = True          # True = skip WFS download (use existing data in GDB)
+    SKIP_PREPROCESS = True         # True = skip preprocess + BC boundary (use existing pp layers)
+    SKIP_VECTOR    = True          # True = skip vector build (use designations_overlapping/planarized already in GDB)
     SKIP_CLEANUP   = True           # True = keep intermediate feature classes
     RASTER         = False          # True = create raster outputs (requires Spatial Analyst) *Currently untested
     CHA_FILTER_OUT_WRS = True       # True = full CHA filter (FINAL + BC + exclude species)
@@ -399,11 +400,30 @@ def main():
     cha_unprot = run_cha_unprotected_summary(
         cha_fc=cha_fc,
         designations_fc=planarized_fc,
+        planarized_intersect_fc=cha_result["planarized_intersect"],
         overlapping_intersect_fc=cha_result["overlapping_intersect"],
         output_gdb=output_gdb,
         summary_out_name=f"cha_unprotected_summary{dl_suffix}_{date_suffix}",
         remainder_out_name=f"cha_prov_unprotected_geom{dl_suffix}_{date_suffix}",
     )
+
+    # The run_cha_intersection capture ran before run_cha_unprotected_summary
+    # stamped the two per-CHA columns, so the already-captured fragment rows do
+    # not carry them yet. Augment the rows in place (keyed by CHA_Source_ID) so
+    # the xlsx fragment sheets match the stamped GDB tables.
+    for rows_key, names_key in (
+        ("planarized_rows", "planarized_field_names"),
+        ("overlapping_rows", "overlapping_field_names"),
+    ):
+        for row in cha_result.get(rows_key) or []:
+            cid = row["CHA_Source_ID"]
+            row["Prov_Unprotect_Cha_Area"] = cha_unprot["unprot_by_id"].get(cid)
+            row["Fed_Prov_Unprotect_Cha_Pct"] = cha_unprot["pct_by_id"].get(cid)
+        names = cha_result.get(names_key)
+        if names is not None:
+            for col in ("Prov_Unprotect_Cha_Area", "Fed_Prov_Unprotect_Cha_Pct"):
+                if col not in names:
+                    names.append(col)
 
     print("[Step 4/7] CHA intersection and area calculation complete.")
 
@@ -473,6 +493,10 @@ def main():
         "cha_overlapping_field_names": cha_result.get("overlapping_field_names"),
         "cha_overlapping_total_rows": cha_result.get("overlapping_total_rows"),
         "cha_overlapping_truncated": cha_result.get("overlapping_truncated"),
+        # CHA unprotected summary sheet (one row per surviving CHA)
+        "cha_summary_rows": cha_unprot["summary_rows"],
+        "cha_summary_field_names": cha_unprot["summary_field_names"],
+        "cha_summary_total_rows": cha_unprot["summary_total_rows"],
     }
 
     written_report = run_report(

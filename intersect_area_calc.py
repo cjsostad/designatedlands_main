@@ -324,6 +324,7 @@ _FIELD_TYPE_MAP = {
 def run_cha_unprotected_summary(
     cha_fc,
     designations_fc,
+    planarized_intersect_fc,
     overlapping_intersect_fc,
     output_gdb,
     summary_out_name="cha_unprotected_summary",
@@ -340,8 +341,11 @@ def run_cha_unprotected_summary(
              of ALL designations (any designation = protection), so dissolving
              it is the full provincial-protection footprint and is far cheaper
              than dissolving the overlapping stack.
-    overlapping_intersect_fc : designations_overlapping_cha — used only to find
-             which CHA_Source_IDs have ANY designation overlap (bucket B vs C).
+    planarized_intersect_fc, overlapping_intersect_fc : the two CHA
+             intersect feature classes. After the summary table is built,
+             the per-CHA Prov_Unprotect_Cha_Area and
+             Fed_Prov_Unprotect_Cha_Pct values are stamped onto every
+             fragment row of each (keyed by CHA_Source_ID).
     """
     arcpy.env.overwriteOutput = True
     arcpy.env.parallelProcessingFactor = "100%"
@@ -358,6 +362,7 @@ def run_cha_unprotected_summary(
     print("=" * 60)
     print(f"  CHA (post-fed-erase)  : {cha_fc}")
     print(f"  Designations (planar) : {designations_fc}")
+    print(f"  Planarized intersect  : {planarized_intersect_fc}")
     print(f"  Overlapping intersect : {overlapping_intersect_fc}")
     print(f"  Output GDB            : {output_gdb}")
     print(f"  Summary table         : {summary_out_name}")
@@ -367,12 +372,14 @@ def run_cha_unprotected_summary(
     LOG.info("CHA unprotected summary starting")
     LOG.info("  CHA FC          : %s", cha_fc)
     LOG.info("  Designations FC : %s", designations_fc)
+    LOG.info("  Planarized FC   : %s", planarized_intersect_fc)
     LOG.info("  Overlapping FC  : %s", overlapping_intersect_fc)
     LOG.info("  Output GDB      : %s", output_gdb)
 
     for label, path in [
         ("CHA", cha_fc),
         ("Designations", designations_fc),
+        ("Planarized intersect", planarized_intersect_fc),
         ("Overlapping intersect", overlapping_intersect_fc),
     ]:
         if not arcpy.Exists(path):
@@ -428,16 +435,7 @@ def run_cha_unprotected_summary(
     LOG.info("Unprotected remainder rows: %d", len(unprot_by_id))
 
     # --------------------------------------------------
-    # 5. CHA_Source_IDs with ANY designation overlap (bucket B vs C)
-    # --------------------------------------------------
-    overlapped_ids = set()
-    with arcpy.da.SearchCursor(overlapping_intersect_fc, ["CHA_Source_ID"]) as cur:
-        for (cid,) in cur:
-            overlapped_ids.add(cid)
-    LOG.info("CHA_Source_IDs with >=1 designation overlap: %d", len(overlapped_ids))
-
-    # --------------------------------------------------
-    # 6. CREATE SUMMARY TABLE (standalone, no geometry)
+    # 5. CREATE SUMMARY TABLE (standalone, no geometry)
     #    Fully-covered CHAs have no remainder geometry, so the summary is a
     #    table; the mappable geometry lives in remainder_fc.
     # --------------------------------------------------
@@ -466,19 +464,17 @@ def run_cha_unprotected_summary(
         summary_table, "Fed_Prov_Unprotect_Cha_Pct", "DOUBLE",
         field_alias="Fed_Prov_Unprotect_Ch_%",
     )
-    arcpy.management.AddField(summary_table, "No_Protection_Area_Ha", "DOUBLE")
-    arcpy.management.AddField(summary_table, "No_Protection_Area_Pct", "DOUBLE")
 
     # --------------------------------------------------
-    # 7. POPULATE, driven by cha_fc (one row per surviving CHA)
+    # 6. POPULATE, driven by cha_fc (one row per surviving CHA)
     # --------------------------------------------------
     print("[Step 5/5] Populating summary rows...")
     insert_fields = [
         "CHA_Source_ID", "ECCC_Cha_Area_Ha", "Cha_Area_Fed_Removed",
         "Prov_Unprotect_Cha_Area", "Fed_Prov_Unprotect_Cha_Pct",
-        "No_Protection_Area_Ha", "No_Protection_Area_Pct",
     ]
     inserted = 0
+    pct_by_id = {}
     with arcpy.da.InsertCursor(summary_table, insert_fields) as i_cur:
         with arcpy.da.SearchCursor(
             cha_fc, ["CHA_Source_ID", "ECCC_Cha_Area_Ha", "Cha_Area_Fed_Removed"]
@@ -491,17 +487,31 @@ def run_cha_unprotected_summary(
                 # geodesic-vs-ECCC method differences (same reason create_cha's
                 # audit allows post > pre on individual rows).
                 pct = min((prov_unprot / eccc) * 100, 100.0) if eccc else None
-                if cid not in overlapped_ids:  # bucket C: no designation overlap at all
-                    no_prot_ha, no_prot_pct = prov_unprot, pct
-                else:  # bucket B: leave No_Protection_* null
-                    no_prot_ha, no_prot_pct = None, None
+                pct_by_id[cid] = pct
                 i_cur.insertRow([
                     cid, eccc, fed_removed, prov_unprot, pct,
-                    no_prot_ha, no_prot_pct,
                 ])
                 inserted += 1
 
     LOG.info("Summary rows inserted: %d", inserted)
+
+    # --------------------------------------------------
+    # 7. STAMP per-CHA values onto both intersect tables
+    #    Repeat Prov_Unprotect_Cha_Area and Fed_Prov_Unprotect_Cha_Pct across
+    #    every fragment row of each CHA (keyed by CHA_Source_ID) so the values
+    #    show in the GDB and the xlsx fragment sheets. These are per-CHA
+    #    values, identical on every fragment of a CHA by design.
+    # --------------------------------------------------
+    print("[Stamp] Writing per-CHA values onto both intersect tables...")
+    for fc in (planarized_intersect_fc, overlapping_intersect_fc):
+        if "Prov_Unprotect_Cha_Area" not in [f.name for f in arcpy.ListFields(fc)]:
+            arcpy.management.AddField(fc, "Prov_Unprotect_Cha_Area", "DOUBLE")
+        if "Fed_Prov_Unprotect_Cha_Pct" not in [f.name for f in arcpy.ListFields(fc)]:
+            arcpy.management.AddField(fc, "Fed_Prov_Unprotect_Cha_Pct", "DOUBLE",
+                                      field_alias="Fed_Prov_Unprotect_Ch_%")
+        with arcpy.da.UpdateCursor(fc, ["CHA_Source_ID", "Prov_Unprotect_Cha_Area", "Fed_Prov_Unprotect_Cha_Pct"]) as cur:
+            for cid, _, _ in cur:
+                cur.updateRow([cid, unprot_by_id.get(cid), pct_by_id.get(cid)])
 
     # Clean up the temporary protection mask (remainder_fc is kept).
     try:
@@ -538,7 +548,7 @@ def run_cha_unprotected_summary(
         "summary_field_names": summary_field_names,
         "summary_total_rows": inserted,
         "unprot_by_id": unprot_by_id,
-        "overlapped_ids": overlapped_ids,
+        "pct_by_id": pct_by_id,
     }
 
 

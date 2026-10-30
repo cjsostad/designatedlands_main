@@ -24,6 +24,7 @@ from datetime import date, datetime
 import requests
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.comments import Comment
 
 requests.packages.urllib3.disable_warnings()
 
@@ -477,6 +478,7 @@ def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
     # --- Run metadata ---
     ws3.append(["Run Information"])
     ws3.cell(row=ws3.max_row, column=1).font = subtitle_font
+    # TODO (not implemented): write the run's log filename into this sheet so each report maps to its log (Summary 'Run timestamp' is report-write time, not the log's run-start stamp).
     meta_rows = [
         ("Run timestamp", opts.get("run_timestamp", "")),
     ]
@@ -736,11 +738,19 @@ def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
             return
         ws_cha = wb.create_sheet(sheet_name)
         ws_cha.append(list(field_names))
+        no_sum_cols = {"Prov_Unprotect_Cha_Area", "Fed_Prov_Unprotect_Cha_Pct"}
+        no_sum_note = (
+            "Per-CHA value, repeated across every fragment of this CHA — "
+            "do not sum this column."
+        )
         for col_idx in range(1, len(field_names) + 1):
             cell = ws_cha.cell(row=1, column=col_idx)
             cell.font = header_font
             cell.fill = header_fill
             cell.alignment = header_align
+            if (sheet_name in ("CHA Planarized", "CHA Overlapping")
+                    and field_names[col_idx - 1] in no_sum_cols):
+                cell.comment = Comment(no_sum_note, "Pipeline")
         for r in rows:
             ws_cha.append([r.get(fn, "") for fn in field_names])
         if truncated:
@@ -772,6 +782,13 @@ def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
         opts_cha.get("cha_overlapping_field_names"),
         opts_cha.get("cha_overlapping_total_rows", 0),
         opts_cha.get("cha_overlapping_truncated", False),
+    )
+    _append_cha_sheet(
+        "CHA Unprotected Summary",
+        opts_cha.get("cha_summary_rows"),
+        opts_cha.get("cha_summary_field_names"),
+        opts_cha.get("cha_summary_total_rows", 0),
+        False,
     )
 
     wb.save(out_path)

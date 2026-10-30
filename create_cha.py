@@ -449,6 +449,7 @@ def _federal_erase_pipeline(out_gdb, pre_erase_fc, federal_mask_gdb,
                 f"DL.download() fetches the supporting sources."
             )
         feat_count = int(arcpy.management.GetCount(src_path)[0])
+        # TODO (not implemented): sanity floor / warn on mask input counts — PMBC Federal briefly served 1,593 vs the usual 5,279 on 2026-10-19 (transient DataBC state); a floor would make a future silent undercount loud.
         if feat_count == 0:
             raise RuntimeError(
                 f"Federal mask input '{designation}' has 0 features — refusing to "
