@@ -873,3 +873,9 @@ The NWA mask uses CPCAD edition 2025 (`ProtectedConservedArea_2025.gdb` / `Prote
 This repository was originally posted and  maintained by [Environmental Reporting BC](http://www2.gov.bc.ca/gov/content?id=FF80E0B985F245CEA62808414D78C41B). Click [here](https://github.com/bcgov/designatedlands) for the original Designated Lands Repository. 
 
 Click [here](https://github.com/cjsostad/designatedlands---AG) for the repository that contains the script described in this document.
+
+---
+
+## Note: Restriction Ratings
+
+> **Note — how to interpret the restriction ratings.** The forestry, oil-&-gas, and mining restriction levels are not an official or regulatory classification. They were assigned manually in `sources_designations.csv` by the original project team, by interpreting the enabling legislation, regulations, and management plans governing each designation, and generalizing each to a coarse five-level scale (Full/High/Medium/Low/None). The assignments involve subjective interpretation — several are explicitly flagged as uncertain in the `comments_2019` column — and were produced for a provincial-scale conservation-reporting indicator, which the source dataset states is not for operational or management decision-making. They should be treated as an interpretive summary, not an authoritative determination of what is permitted on any given designation.
