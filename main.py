@@ -5,14 +5,16 @@ Run the full designatedlands pipeline in sequence.
 
 This script orchestrates the complete Designated Lands analysis for
 British Columbia, combining 40+ spatial designation layers (parks,
-conservancies, wildlife management areas, etc.) into two output
-feature classes:
+conservancies, wildlife management areas, etc.) into two core output
+feature classes plus a consolidated planarized CHA result:
 
   - designations_overlapping: all designations stacked/unioned, allowing
     overlapping polygons (a single area can carry multiple designations).
   - designations_planarized: a non-overlapping layer where each polygon
     is assigned the single highest-priority designation (based on
     process_order from the CSV).
+  - designations_planarized*_sliver_consolidated: the planarized CHA
+    intersection with small slivers dissolved by CHA/community group.
 
 Pipeline steps:
   1. test-connection  — Verify the File Geodatabase is accessible.
@@ -23,7 +25,9 @@ Pipeline steps:
                         clip by another layer) and build the combined
                         BC land+marine boundary polygon.
   4. process-vector   — Build the two main output feature classes:
-                        designations_overlapping and designations_planarized.
+                        designations_overlapping and designations_planarized,
+                        intersect them with CHA, and consolidate small slivers
+                        in the planarized CHA output.
   5. process-raster   — (Optional, requires Spatial Analyst) Convert vector
                         outputs to raster TIFs for designation and
                         restriction levels.
@@ -52,16 +56,43 @@ Usage:
 import argparse
 import csv
 import logging
+import importlib.util
 import os
 import sys
 import datetime
 import arcpy
+
+# Resolve project modules from the same directory as this script first.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from designatedlands import DesignatedLands, log_arcpy_messages, set_log_level
 from create_cha import prepare_cha   # <-- import CHA script (retry + fallback, no AOI)
 from intersect_area_calc import run_cha_intersection, run_cha_unprotected_summary
 from date_filter import run_report
 from gdb_utils import ensure_file_gdb
+
+sliver_module_path = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "Sliver_Consolidator.py",
+)
+sliver_spec = importlib.util.spec_from_file_location(
+    "_project_sliver_consolidator",
+    sliver_module_path,
+)
+if sliver_spec is None or sliver_spec.loader is None:
+    raise ImportError(
+        f"Could not load Sliver_Consolidator.py from {sliver_module_path}"
+    )
+
+sliver_module = importlib.util.module_from_spec(sliver_spec)
+sliver_spec.loader.exec_module(sliver_module)
+try:
+    consolidate_slivers = sliver_module.consolidate_slivers
+except AttributeError as exc:
+    raise ImportError(
+        f"Sliver_Consolidator.py at {sliver_module_path} "
+        "does not define consolidate_slivers."
+    ) from exc
 
 
 # Max rows written to each CHA result sheet in the xlsx report.
@@ -385,13 +416,14 @@ def main():
     # Date-stamped output names
     now = datetime.datetime.now()
     date_suffix = now.strftime("%m_%d")
+    planarized_cha_name = f"designations_planarized{dl_suffix}_cha_{date_suffix}"
 
     cha_result = run_cha_intersection(
         cha_fc=cha_fc,
         planarized_fc=planarized_fc,
         overlapping_fc=overlapping_fc,
         output_gdb=output_gdb,
-        planarized_out_name=f"designations_planarized{dl_suffix}_cha_{date_suffix}",
+        planarized_out_name=planarized_cha_name,
         overlapping_out_name=f"designations_overlapping{dl_suffix}_cha_{date_suffix}",
         return_rows=True,
         row_limit=CHA_REPORT_ROW_LIMIT,
@@ -426,6 +458,24 @@ def main():
                     names.append(col)
 
     print("[Step 4/7] CHA intersection and area calculation complete.")
+
+    print("[Step 4/7] Consolidating small planarized CHA slivers...")
+    consolidated_output_name = f"{planarized_cha_name}_sliver_consolidated"
+    run_step(
+        "sliver-consolidation",
+        lambda: consolidate_slivers(
+            input_fc=os.path.join(output_gdb, planarized_cha_name),
+            final_gdb=output_gdb,
+            working_folder=os.path.join(
+                script_dir, "outputs", "sliver_consolidation_work",
+            ),
+            output_name=consolidated_output_name,
+        ),
+    )
+    print(
+        "[Step 4/7] Sliver consolidation complete: "
+        f"{os.path.join(output_gdb, consolidated_output_name)}\n"
+    )
 
     # ---------------------------------
     # REPORT - Generate xlsx pipeline report
@@ -567,4 +617,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
