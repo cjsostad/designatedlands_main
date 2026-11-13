@@ -183,12 +183,12 @@ def main():
     END_DATE       = ""   # End of date window (YYYY-MM-DD) or "" for today
     EXCLUDE_FEDERAL = True          # Drop federal designation layers (NP, NWA, MBS) from the creation of Land Designations Stack
     FEDERAL_ERASE  = True           # Erase federal land (PMBC fed, IRs, NPs, NWAs) from CHA before intersect, Independent of EXCLUDE_FEDERAL (that one gates designation sources; this one gates CHA geometry).
-    SKIP_DOWNLOAD  = True          # True = skip WFS download (use existing data in GDB)
-    SKIP_PREPROCESS = True         # True = skip preprocess + BC boundary (use existing pp layers)
-    SKIP_VECTOR    = True          # True = skip vector build (use designations_overlapping/planarized already in GDB)
+    SKIP_DOWNLOAD  = False          # True = skip WFS download (use existing data in GDB)
+    SKIP_PREPROCESS = False         # True = skip preprocess + BC boundary (use existing pp layers)
+    SKIP_VECTOR    = False          # True = skip vector build (use designations_overlapping/planarized already in GDB)
     SKIP_CLEANUP   = True           # True = keep intermediate feature classes
     RASTER         = False          # True = create raster outputs (requires Spatial Analyst) *Currently untested
-    CHA_FILTER_OUT_WRS = True       # True = full CHA filter (FINAL + BC + exclude species)
+    CHA_FILTER_OUT_WRS = False       # True = full CHA filter (FINAL + BC + exclude species)
                                     # False = minimal CHA filter (FINAL + BC only)
     # =================================================================
 

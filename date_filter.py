@@ -221,6 +221,7 @@ _DATE_FIELD_STATUS = {
     "UPDATE_DATE": "Updated",
     "PROJECT_ESTABLISHED_DATE": "Newly established",
     "CW_DATE_CREATED": "Newly created",
+    "WHEN_UPDATED": "Updated",
 }
 
 
@@ -758,6 +759,8 @@ def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
             "overlapping_designations": "Additional Overlapping Designations",
             "MigBird": "Migratory Bird (1=Yes, 2=No)",
             "Type_E": "CH Type",
+            "CommName_E": "Common Name",
+            "Population_E": "Population",
         }
 
         visible_fields = [

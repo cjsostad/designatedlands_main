@@ -457,6 +457,23 @@ def run_cha_unprotected_summary(
     else:
         arcpy.management.AddField(summary_table, "CHA_Source_ID", id_add_type)
 
+    # Species identity columns (common name + population), mirrored from the
+    # CHA layer so a reader can see which species each unprotected CHA is for
+    # without switching sheets to cross-reference CHA_Source_ID. One
+    # CHA_Source_ID == one ECCC polygon == one species record (1:1 add).
+    for _sp_field in ("CommName_E", "Population_E"):
+        _src_f = next(
+            (f for f in arcpy.ListFields(cha_fc) if f.name == _sp_field), None
+        )
+        if _src_f is None:
+            raise RuntimeError(
+                f"Expected species field '{_sp_field}' not found on {cha_fc}"
+            )
+        arcpy.management.AddField(
+            summary_table, _sp_field, "TEXT",
+            field_length=(_src_f.length or 255),
+        )
+
     arcpy.management.AddField(summary_table, "ECCC_Cha_Area_Ha", "DOUBLE")
     arcpy.management.AddField(summary_table, "Cha_Area_Fed_Removed", "DOUBLE")
     arcpy.management.AddField(summary_table, "Prov_Unprotect_Cha_Area", "DOUBLE")
@@ -470,16 +487,19 @@ def run_cha_unprotected_summary(
     # --------------------------------------------------
     print("[Step 5/5] Populating summary rows...")
     insert_fields = [
-        "CHA_Source_ID", "ECCC_Cha_Area_Ha", "Cha_Area_Fed_Removed",
+        "CHA_Source_ID", "CommName_E", "Population_E",
+        "ECCC_Cha_Area_Ha", "Cha_Area_Fed_Removed",
         "Prov_Unprotect_Cha_Area", "Fed_Prov_Unprotect_Cha_Pct",
     ]
     inserted = 0
     pct_by_id = {}
     with arcpy.da.InsertCursor(summary_table, insert_fields) as i_cur:
         with arcpy.da.SearchCursor(
-            cha_fc, ["CHA_Source_ID", "ECCC_Cha_Area_Ha", "Cha_Area_Fed_Removed"]
+            cha_fc,
+            ["CHA_Source_ID", "CommName_E", "Population_E",
+             "ECCC_Cha_Area_Ha", "Cha_Area_Fed_Removed"],
         ) as s_cur:
-            for cid, eccc, fed_removed in s_cur:
+            for cid, comm_name, population, eccc, fed_removed in s_cur:
                 prov_unprot = unprot_by_id.get(cid, 0.0)  # 0 when fully provincially covered
                 # Denominator is the FULL original ECCC_Cha_Area_Ha (not
                 # Cha_Area_Fed_Removed): the federal slice sits in the
@@ -489,7 +509,8 @@ def run_cha_unprotected_summary(
                 pct = min((prov_unprot / eccc) * 100, 100.0) if eccc else None
                 pct_by_id[cid] = pct
                 i_cur.insertRow([
-                    cid, eccc, fed_removed, prov_unprot, pct,
+                    cid, comm_name, population, eccc, fed_removed,
+                    prov_unprot, pct,
                 ])
                 inserted += 1
 

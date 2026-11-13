@@ -1755,6 +1755,17 @@ class DesignatedLands:
             spatial_reference=arcpy.SpatialReference(3005),
         )
 
+        # TODO (column-order consistency, not yet fixed): the restriction fields
+        # below are declared forest / MINE / OG, but create_designations_overlapping
+        # declares them forest / OG / MINE. The xlsx report mirrors each feature
+        # class's physical field order (intersect_area_calc.py ListFields ->
+        # date_filter.py), so the "CHA Planarized" sheet shows forest/mine/og while
+        # "CHA Overlapping" shows forest/og/mine. This is COSMETIC ONLY — every
+        # header sits over its own data (out_fields and the insertRow tuple below
+        # stay aligned with these names). To make the sheets consistent, swap
+        # mine/og here to forest/og/mine AND, in the same edit, reorder both
+        # `out_fields` and the `insertRow([...])` value tuple to match. All three
+        # must move together or values WILL land in the wrong column.
         planar_fields = [
             ("process_order", "SHORT", None),
             ("designation", "TEXT", 255),
