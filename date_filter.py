@@ -668,18 +668,6 @@ def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
                                fill_type="solid"),
     }
 
-    def _categorize(fr, og, mr):
-        fr, og, mr = fr.strip().upper(), og.strip().upper(), mr.strip().upper()
-        vals = [fr, og, mr]
-        if all(v == "PROTECTED" for v in vals):
-            return "PPA"
-        if all(v in ("FULL", "HIGH", "PROTECTED") for v in vals):
-            return "Protected Other"
-        if (any(v in ("FULL", "HIGH", "PROTECTED") for v in vals)
-                and any(v in ("NONE", "LOW", "MEDIUM") for v in vals)):
-            return "Exclude 1_2 Activities"
-        return "Managed"
-
     cat_headers = [
         "Process Order", "Designation", "Name",
         "Forest Restriction", "OG Restriction", "Mine Restriction",
@@ -851,6 +839,23 @@ def write_report_xlsx(change_rows, excluded_entries, summary, out_path,
 # ---------------------------------------------------------------------------
 # Standalone report
 # ---------------------------------------------------------------------------
+
+def _categorize(fr, og, mr):
+    """Classify a designation by its forest/OG/mine restriction levels.
+
+    Shared by the xlsx "Designation Categories" sheet and the HTML dashboard.
+    """
+    fr, og, mr = fr.strip().upper(), og.strip().upper(), mr.strip().upper()
+    vals = [fr, og, mr]
+    if all(v == "PROTECTED" for v in vals):
+        return "PPA"
+    if all(v in ("FULL", "HIGH", "PROTECTED") for v in vals):
+        return "Protected Other"
+    if (any(v in ("FULL", "HIGH", "PROTECTED") for v in vals)
+            and any(v in ("NONE", "LOW", "MEDIUM") for v in vals)):
+        return "Exclude 1_2 Activities"
+    return "Managed"
+
 
 def _find_csv():
     """Locate sources_designations.csv relative to this script."""
@@ -1113,6 +1118,15 @@ def run_report(start_date, end_date, test_wfs=False, xlsx_path=None,
             source_queries=source_queries,
         )
         print(f"  Report saved to: {written}\n")
+        try:
+            from html_report import write_report_html
+            html_path = os.path.splitext(written)[0] + ".html"
+            write_report_html(change_rows, excluded_info, summary, html_path,
+                              federal_excluded=federal_excluded,
+                              pipeline_options=pipeline_options)
+            print(f"  HTML dashboard saved to: {html_path}")
+        except Exception as exc:
+            print(f"  WARNING: HTML dashboard generation failed: {exc}")
         return written
 
     return None
