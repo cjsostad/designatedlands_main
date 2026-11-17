@@ -47,7 +47,20 @@
   .kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
   .kpi {
     background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
-    padding: 16px 18px;
+    padding: 16px 18px; position: relative;
+  }
+  .kpi-i { font-size: 11px; color: var(--muted); cursor: help; }
+  .kpi-tip {
+    position: absolute; left: 0; top: calc(100% + 6px); z-index: 20;
+    width: 260px; max-width: 80vw;
+    background: var(--panel2); color: var(--ink);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; font-size: 12px; line-height: 1.45;
+    box-shadow: 0 8px 24px rgba(0,0,0,.45);
+    opacity: 0; visibility: hidden; transition: opacity .12s; pointer-events: none;
+  }
+  .kpi:hover .kpi-tip, .kpi:focus .kpi-tip, .kpi:focus-within .kpi-tip {
+    opacity: 1; visibility: visible;
   }
   .kpi .v { font-size: 26px; font-weight: 700; }
   .kpi .l { font-size: 12px; color: var(--muted); margin-top: 2px; }
@@ -137,7 +150,7 @@
   </div>
 
   <section>
-    <h2>Run Integrity Ledger</h2>
+    <h2>Run Summary</h2>
     <div class="panel">
       <div id="truncation-warn"></div>
       <div class="ledger" id="ledger"></div>
@@ -185,20 +198,35 @@
     const k = DATA.kpi || {};
     const el = document.getElementById("kpis");
     const cards = [
-      { v: (k.pct ?? 0) + "%", l: "Provincial protection", hero: true },
-      { v: fmt(k.assessed), l: "Assessed CHA (ha)" },
-      { v: fmt(k.protected), l: "Protected CHA (ha)" },
-      { v: fmt(k.species), l: "Species groups" },
-      { v: fmt(k.cha_polys), l: "CHA summary rows" },
-      { v: fmt(k.datasets), l: "Total datasets" },
-      { v: fmt(k.date_filtered), l: "Date-filtered" },
-      { v: fmt(k.changed), l: "Layers changed" },
-      { v: fmt(k.no_change), l: "Layers unchanged" },
-      { v: fmt(k.excluded), l: "Excluded" },
-      { v: fmt(k.features_changed), l: "Features changed" }
+      { v: (k.pct ?? 0) + "%", l: "Provincial protection", hero: true,
+        d: "Protected CHA divided by CHA Hectares with Fed Removed. Area-weighted, so the large-range caribou populations dominate it. On a date-filtered run it reflects only designations new in the window." },
+      { v: fmt(k.assessed), l: "CHA Hectares with Fed Removed",
+        d: "Sum of Cha_Area_Fed_Removed over every CHA polygon: ECCC critical habitat, clipped to the terrestrial boundary, with federal parcels erased. Summed per polygon, so overlapping species ranges are counted more than once." },
+      { v: fmt(k.protected), l: "Protected CHA (ha)",
+        d: "Sum of (Cha_Area_Fed_Removed minus Prov_Unprotect_Cha_Area) across all CHA polygons: the fed-removed habitat that overlaps a provincial designation (the planarized, non-overlapping designation layer). On a date-filtered run, only designations new in the window count." },
+      { v: fmt(k.species), l: "Species groups",
+        d: "Count of distinct species/populations (CommName_E) with mapped critical habitat in this run." },
+      { v: fmt(k.cha_polys), l: "CHA summary rows",
+        d: "Number of CHA polygons (one row per CHA_Source_ID) surviving the federal erase." },
+      { v: fmt(k.datasets), l: "Total datasets",
+        d: "Designation layers defined in sources_designations.csv that are not excluded." },
+      { v: fmt(k.date_filtered), l: "Date-filtered",
+        d: "Layers that have a usable date field and were filtered to the window." },
+      { v: fmt(k.changed), l: "Layers changed",
+        d: "Date-filtered layers that returned at least one feature in the window." },
+      { v: fmt(k.no_change), l: "Layers unchanged",
+        d: "Date-filtered layers that returned zero features in the window." },
+      { v: fmt(k.excluded), l: "Excluded",
+        d: "Layers dropped for having no usable date field (or a non-BCGW source) while the date filter is on." },
+      { v: fmt(k.features_changed), l: "Features changed",
+        d: "Total features added or amended across all layers in the window." }
     ];
     el.innerHTML = cards.map(c =>
-      `<div class="kpi ${c.hero ? "hero" : ""}"><div class="v">${c.v}</div><div class="l">${c.l}</div></div>`
+      `<div class="kpi ${c.hero ? "hero" : ""}" ${c.d ? 'tabindex="0"' : ''}>
+         <div class="v">${c.v}</div>
+         <div class="l">${c.l}${c.d ? ' <span class="kpi-i" aria-hidden="true">&#9432;</span>' : ''}</div>
+         ${c.d ? `<div class="kpi-tip" role="tooltip">${c.d}</div>` : ''}
+       </div>`
     ).join("");
   })();
 

@@ -89,7 +89,6 @@ def write_report_html(change_rows, excluded_entries, summary, out_path,
         cha_rows = opts.get("cha_summary_rows") or []
         field_names = opts.get("cha_summary_field_names") or []
         required = [
-            "Common Name",
             "ECCC_Cha_Area_Ha",
             "Cha_Area_Fed_Removed",
             "Prov_Unprotect_Cha_Area",
@@ -106,7 +105,7 @@ def write_report_html(change_rows, excluded_entries, summary, out_path,
                 lambda: {"eccc": 0.0, "fed": 0.0, "unprot": 0.0, "n": 0}
             )
             for row in cha_rows:
-                name = row.get("Common Name")
+                name = row.get("CommName_E") or row.get("Common Name")
                 key = name if name else "Unknown"
                 grp = groups[key]
                 grp["eccc"] += _to_float(row.get("ECCC_Cha_Area_Ha"))
